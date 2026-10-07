@@ -13,7 +13,8 @@
 #   help        - 显示帮助说明
 #
 # 选项:
-#   --arch=<arm64|x86_64>   指定目标架构（默认自动检测当前系统架构）
+#   --arch=<arm64|x86_64|universal>  指定目标架构（默认自动检测当前系统架构）
+#                                    universal = Intel + Apple Silicon 通用二进制
 #   --debug                 构建 Debug 版本
 #   --release               构建 Release 优化版本（app / dmg 默认即 release）
 # ==============================================================================
@@ -43,11 +44,13 @@ if [[ "$command" == "bump-version" || "$command" == "bump" ]]; then
 else
     for arg in "$@"; do
         case "$arg" in
-            --arch=arm64)   arch_flag="arm64" ;;
-            --arch=x86_64)  arch_flag="x86_64" ;;
+            --arch=arm64)       arch_flag="arm64" ;;
+            --arch=x86_64)      arch_flag="x86_64" ;;
+            --arch=universal)   arch_flag="universal" ;;
+            --arch=fat)         arch_flag="universal" ;;
             --debug)        build_mode="debug" ;;
             --release)      build_mode="release" ;;
-            --arch=*)       echo "[FAIL] 未知架构: $arg（仅支持 arm64 / x86_64）" >&2; exit 1 ;;
+            --arch=*)           echo "[FAIL] 未知架构: $arg（仅支持 arm64 / x86_64 / universal）" >&2; exit 1 ;;
             *)              echo "[FAIL] 未知参数: $arg" >&2; exit 1 ;;
         esac
     done
@@ -57,10 +60,14 @@ if [[ -z "$arch_flag" ]]; then
     arch_flag="$(uname -m)"
 fi
 
+# rust_targets: 需要编译的 Rust target 列表（universal 为双架构）
+# rust_target : SwiftPM 使用的 LOKII_RUST_TARGET，指向静态库所在目录
+#               （universal 时为合并目录 target/universal）
 case "$arch_flag" in
-    arm64)   rust_target="aarch64-apple-darwin" ;;
-    x86_64)  rust_target="x86_64-apple-darwin" ;;
-    *)       echo "[FAIL] 不支持的架构: $arch_flag" >&2; exit 1 ;;
+    arm64)     rust_target="aarch64-apple-darwin"; rust_targets=(aarch64-apple-darwin) ;;
+    x86_64)    rust_target="x86_64-apple-darwin";  rust_targets=(x86_64-apple-darwin) ;;
+    universal) rust_target="universal";            rust_targets=(aarch64-apple-darwin x86_64-apple-darwin) ;;
+    *)         echo "[FAIL] 不支持的架构: $arch_flag" >&2; exit 1 ;;
 esac
 
 app_name="Lokii"
@@ -87,22 +94,38 @@ Lokii 统一构建与发布脚本
   help                   显示本帮助信息
 
 选项:
-  --arch=<arm64|x86_64>   指定目标架构（默认: $(uname -m)）
+  --arch=<arm64|x86_64|universal>  指定目标架构（默认: $(uname -m)）
+                                   universal = Intel + Apple Silicon 通用二进制
   --debug                 构建 Debug 版本
   --release               构建 Release 优化版本（默认）
 EOF
 }
 
 generate_bindings() {
-    echo "==> [1/2] 编译 Rust 核心库 ($rust_target, release)..."
-    cargo build -p lokii-core --lib --release --target "$rust_target" --manifest-path "$repo_root/Cargo.toml"
+    echo "==> [1/2] 编译 Rust 核心库 (${rust_targets[*]}, release)..."
+    for t in "${rust_targets[@]}"; do
+        cargo build -p lokii-core --lib --release --target "$t" --manifest-path "$repo_root/Cargo.toml"
+    done
+
+    # universal：将各架构静态库 lipo 合并到 target/universal/release/liblokii_core.a
+    # SwiftPM 会通过 LOKII_RUST_TARGET=universal 命中该目录
+    if [[ "$arch_flag" == "universal" ]]; then
+        local uni_dir="$repo_root/target/universal/release"
+        mkdir -p "$uni_dir"
+        lipo -create \
+            "$repo_root/target/aarch64-apple-darwin/release/liblokii_core.a" \
+            "$repo_root/target/x86_64-apple-darwin/release/liblokii_core.a" \
+            -output "$uni_dir/liblokii_core.a"
+        echo "==> lipo 合并通用静态库: $uni_dir/liblokii_core.a"
+    fi
 
     echo "==> [2/2] 生成 UniFFI Swift 绑定与头文件..."
     local out_dir
     out_dir="$(mktemp -d)"
 
+    # 绑定与头文件与架构无关，用首个 target 的 dylib 生成即可
     cargo run -p lokii-core --bin uniffi-bindgen --manifest-path "$repo_root/Cargo.toml" -- generate \
-        --library "$repo_root/target/$rust_target/release/liblokii_core.dylib" \
+        --library "$repo_root/target/${rust_targets[0]}/release/liblokii_core.dylib" \
         --language swift \
         --out-dir "$out_dir"
 
@@ -121,7 +144,12 @@ build_app() {
     echo "==> 编译 Swift 原生应用 ($build_mode, $arch_flag)..."
     cd "$repo_root/Lokii"
 
-    local swift_flags=("--arch" "$arch_flag")
+    local swift_flags=()
+    if [[ "$arch_flag" == "universal" ]]; then
+        swift_flags+=("--arch" "arm64" "--arch" "x86_64")
+    else
+        swift_flags+=("--arch" "$arch_flag")
+    fi
     if [[ "$build_mode" == "release" ]]; then
         swift_flags+=("-c" "release")
     fi
@@ -177,10 +205,25 @@ build_app() {
         cargo_profile="debug"
         cargo_profile_flag=""
     fi
-    echo "==> 编译 lokii 命令行工具 ($cargo_profile, $rust_target)..."
-    cargo build --manifest-path "$repo_root/Cargo.toml" -p lokii-core --bin lokii \
-        --target "$rust_target" $cargo_profile_flag
-    local cli_bin="$repo_root/target/$rust_target/$cargo_profile/lokii"
+    echo "==> 编译 lokii 命令行工具 ($cargo_profile, ${rust_targets[*]})..."
+    local cli_bin
+    if [[ "$arch_flag" == "universal" ]]; then
+        for t in "${rust_targets[@]}"; do
+            cargo build --manifest-path "$repo_root/Cargo.toml" -p lokii-core --bin lokii \
+                --target "$t" $cargo_profile_flag
+        done
+        local uni_dir="$repo_root/target/universal/$cargo_profile"
+        mkdir -p "$uni_dir"
+        lipo -create \
+            "$repo_root/target/aarch64-apple-darwin/$cargo_profile/lokii" \
+            "$repo_root/target/x86_64-apple-darwin/$cargo_profile/lokii" \
+            -output "$uni_dir/lokii"
+        cli_bin="$uni_dir/lokii"
+    else
+        cargo build --manifest-path "$repo_root/Cargo.toml" -p lokii-core --bin lokii \
+            --target "$rust_target" $cargo_profile_flag
+        cli_bin="$repo_root/target/$rust_target/$cargo_profile/lokii"
+    fi
     if [[ ! -x "$cli_bin" ]]; then
         echo "[FAIL] 未找到 CLI 可执行文件: $cli_bin" >&2
         exit 1

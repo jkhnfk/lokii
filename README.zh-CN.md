@@ -83,14 +83,26 @@ cd Lokii && .build/debug/Lokii
 通过 Makefile 一键构建独立发布的 `.app` 和 `.dmg`：
 
 ```bash
-# 构建 Apple Silicon 架构版本 (arm64)
+# 通用二进制（Intel + Apple Silicon），发布首选用它
+make package ARCH=universal
+
+# 仅 Apple Silicon 架构版本 (arm64)
 make package ARCH=arm64
 
-# 构建 Intel 架构版本 (x86_64)
+# 仅 Intel 架构版本 (x86_64)
 make package ARCH=x86_64
 ```
 
-构建输出路径位于 `output/Lokii-<arch>.dmg`。
+构建输出路径位于 `output/Lokii-<arch>.dmg`（如 `output/Lokii-universal.dmg`）。
+
+`universal` 会同时编译两个 Rust target（`aarch64-apple-darwin` 与
+`x86_64-apple-darwin`），用 `lipo` 合并静态核心库与 `lokii` CLI，并要求
+SwiftPM 产出胖二进制 `Lokii`——因此单个 `.app` 可在 Intel 与 Apple
+Silicon 上原生运行。构建前需安装 x86_64 目标：
+
+```bash
+rustup target add x86_64-apple-darwin
+```
 
 ## 命令行工具
 

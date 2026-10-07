@@ -83,14 +83,28 @@ cd Lokii && .build/debug/Lokii
 To create a distributable `.app` and `.dmg`:
 
 ```bash
-# Build for Apple Silicon (arm64)
+# Universal binary (Intel + Apple Silicon) — recommended for distribution
+make package ARCH=universal
+
+# Single-architecture build for Apple Silicon (arm64)
 make package ARCH=arm64
 
-# Build for Intel (x86_64)
+# Single-architecture build for Intel (x86_64)
 make package ARCH=x86_64
 ```
 
-Output disk images will be generated in `output/Lokii-<arch>.dmg`.
+Output disk images will be generated in `output/Lokii-<arch>.dmg`
+(e.g. `output/Lokii-universal.dmg`).
+
+The `universal` build compiles both Rust targets
+(`aarch64-apple-darwin` and `x86_64-apple-darwin`), `lipo`-merges the static
+core library and the `lokii` CLI, and asks SwiftPM for a fat `Lokii`
+executable — so a single `.app` runs natively on both Intel and Apple
+Silicon. It requires the x86_64 Rust target:
+
+```bash
+rustup target add x86_64-apple-darwin
+```
 
 ## Command-Line Interface
 

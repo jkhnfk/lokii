@@ -1,14 +1,18 @@
 .PHONY: all build release test check bindings package bump-version cli clean help
 
-# 默认架构检测（支持 arm64 或 x86_64）
-ARCH ?= $(shell uname -m)
+# 默认架构：universal（Intel + Apple Silicon 通用版），可覆盖为 arm64 / x86_64
+ARCH ?= universal
 
 ifeq ($(ARCH),arm64)
 RUST_TARGET := aarch64-apple-darwin
 else ifeq ($(ARCH),x86_64)
 RUST_TARGET := x86_64-apple-darwin
+else ifeq ($(ARCH),universal)
+# universal 由 scripts/build.sh 内部 lipo 合并双架构；
+# 此处 RUST_TARGET 仅作为 test/cli 等单架构目标的原生回退
+RUST_TARGET := aarch64-apple-darwin
 else
-$(error 不支持的架构: $(ARCH)，仅支持 arm64 或 x86_64)
+$(error 不支持的架构: $(ARCH)，仅支持 arm64 / x86_64 / universal)
 endif
 
 all: build
@@ -20,7 +24,7 @@ help:
 	@echo "  make bindings [ARCH=...] - 编译 Rust 核心并生成 UniFFI Swift 绑定"
 	@echo "  make test [ARCH=...]     - 运行 Rust 核心单测与 Swift 编译校验"
 	@echo "  make check [ARCH=...]    - 运行 Rust 核心静态类型与目标检查"
-	@echo "  make package [ARCH=...]  - 打包构建 macOS DMG 安装镜像 (支持 arm64 / x86_64)"
+	@echo "  make package [ARCH=...]  - 打包构建 macOS DMG 安装镜像 (支持 arm64 / x86_64 / universal)"
 	@echo "  make cli [ARCH=...]      - 编译命令行搜索工具 (target/$(RUST_TARGET)/release/lokii)"
 	@echo "  make bump-version V=...  - 更新项目全量版本号 (如: make bump-version V=0.1.0)"
 	@echo "  make clean               - 清理构建产物与临时文件"
