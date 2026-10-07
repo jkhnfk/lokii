@@ -92,6 +92,34 @@ make package ARCH=x86_64
 
 构建输出路径位于 `output/Lokii-<arch>.dmg`。
 
+## 命令行工具
+
+驱动 App 的同一套 Rust 内核，也以对脚本友好的 CLI 形式提供。它复用 App
+的配置文件（`~/.config/lokii/config.toml`）与持久化索引缓存
+（`~/.config/lokii/index.cache`），因此只要 App 建好索引，即可秒级搜索、
+无需重新扫描磁盘。
+
+```bash
+make cli
+# 可执行文件: target/$(uname -m)-apple-darwin/release/lokii
+
+lokii report                # 子串搜索（无结果时自动回退模糊匹配）
+lokii '*.rs'                # 通配符
+lokii 'regex:^main'         # 正则表达式
+lokii -m fuzzy config       # 强制模糊匹配
+lokii -l 10 report          # 限制结果数量
+lokii -e pdf report         # 仅返回 .pdf 结果
+lokii -f report             # 仅文件（-D 仅目录）
+lokii -j report             # JSON Lines 输出
+lokii -0 report | xargs -0 open   # NUL 分隔，管道安全
+lokii -d ~/Projects -m fuzzy cfg  # 临时扫描指定目录
+lokii --rebuild             # 重建共享索引缓存
+vim "$(lokii -l 1 'todo.md')"
+```
+
+每条匹配结果都会以绝对路径的形式逐行输出到 stdout，可无缝接入 shell
+脚本；进度与诊断信息输出到 stderr。完整参数说明请运行 `lokii --help`。
+
 ## 贡献者
 
 <p align="center">

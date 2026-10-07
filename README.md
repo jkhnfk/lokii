@@ -92,6 +92,35 @@ make package ARCH=x86_64
 
 Output disk images will be generated in `output/Lokii-<arch>.dmg`.
 
+## Command-Line Interface
+
+The same Rust core that powers the app also ships as a script-friendly CLI.
+It reuses the app's configuration (`~/.config/lokii/config.toml`) and its
+persistent index cache (`~/.config/lokii/index.cache`), so once the app has
+built an index the CLI answers instantly without re-scanning your disk.
+
+```bash
+make cli
+# binary: target/$(uname -m)-apple-darwin/release/lokii
+
+lokii report                # substring search (fuzzy fallback when empty)
+lokii '*.rs'                # wildcard
+lokii 'regex:^main'         # regular expression
+lokii -m fuzzy config       # force fuzzy matching
+lokii -l 10 report          # cap results
+lokii -e pdf report         # only .pdf results
+lokii -f report             # files only (-D for directories only)
+lokii -j report             # JSON Lines output
+lokii -0 report | xargs -0 open   # NUL-separated, pipe-safe
+lokii -d ~/Projects -m fuzzy cfg  # scan a specific root on the fly
+lokii --rebuild             # (re)build the shared index cache
+vim "$(lokii -l 1 'todo.md')"
+```
+
+Every match is printed as an absolute path on its own line (stdout), so it
+composes cleanly with shell scripts. Diagnostics and progress go to stderr.
+Run `lokii --help` for the full flag reference.
+
 ## Contributors
 
 <p align="center">

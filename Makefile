@@ -1,4 +1,4 @@
-.PHONY: all build release test check bindings package bump-version clean help
+.PHONY: all build release test check bindings package bump-version cli clean help
 
 # 默认架构检测（支持 arm64 或 x86_64）
 ARCH ?= $(shell uname -m)
@@ -21,6 +21,7 @@ help:
 	@echo "  make test [ARCH=...]     - 运行 Rust 核心单测与 Swift 编译校验"
 	@echo "  make check [ARCH=...]    - 运行 Rust 核心静态类型与目标检查"
 	@echo "  make package [ARCH=...]  - 打包构建 macOS DMG 安装镜像 (支持 arm64 / x86_64)"
+	@echo "  make cli [ARCH=...]      - 编译命令行搜索工具 (target/$(RUST_TARGET)/release/lokii)"
 	@echo "  make bump-version V=...  - 更新项目全量版本号 (如: make bump-version V=0.1.0)"
 	@echo "  make clean               - 清理构建产物与临时文件"
 
@@ -42,6 +43,11 @@ check:
 
 package:
 	@./scripts/build.sh dmg --arch=$(ARCH)
+
+cli:
+	@cargo build -p lokii-core --bin lokii --release --target $(RUST_TARGET)
+	@echo "==> CLI 已构建: target/$(RUST_TARGET)/release/lokii"
+	@echo "    试用: target/$(RUST_TARGET)/release/lokii --help"
 
 bump-version:
 	@if [ -z "$(V)" ]; then echo "错误: 请指定版本号，例如: make bump-version V=0.1.0"; exit 1; fi
