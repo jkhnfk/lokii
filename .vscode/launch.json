@@ -1,0 +1,24 @@
+{
+  "configurations": [
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:lokii}/Lokii",
+      "name": "Debug Lokii (Lokii)",
+      "target": "Lokii",
+      "configuration": "debug",
+      "preLaunchTask": "swift: Build Debug Lokii (Lokii)"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:lokii}/Lokii",
+      "name": "Release Lokii (Lokii)",
+      "target": "Lokii",
+      "configuration": "release",
+      "preLaunchTask": "swift: Build Release Lokii (Lokii)"
+    }
+  ]
+}

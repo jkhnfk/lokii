@@ -95,9 +95,18 @@ Output disk images will be generated in `output/Lokii-<arch>.dmg`.
 ## Command-Line Interface
 
 The same Rust core that powers the app also ships as a script-friendly CLI.
+It is bundled **inside the app** at `Lokii.app/Contents/Resources/bin/lokii`,
+and on first launch the app quietly symlinks it into your `PATH` (preferring
+`/usr/local/bin`, falling back to `~/.local/bin`), so `lokii` works straight
+from your terminal after installing the app — no extra setup required.
+(Should neither location be writable, the link is skipped silently; add a
+writable directory such as `~/.local/bin` to your `PATH` in that case.)
+
 It reuses the app's configuration (`~/.config/lokii/config.toml`) and its
 persistent index cache (`~/.config/lokii/index.cache`), so once the app has
 built an index the CLI answers instantly without re-scanning your disk.
+
+During development you can build the binary standalone with `make cli`:
 
 ```bash
 make cli

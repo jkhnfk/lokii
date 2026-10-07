@@ -94,10 +94,18 @@ make package ARCH=x86_64
 
 ## 命令行工具
 
-驱动 App 的同一套 Rust 内核，也以对脚本友好的 CLI 形式提供。它复用 App
-的配置文件（`~/.config/lokii/config.toml`）与持久化索引缓存
+驱动 App 的同一套 Rust 内核，也以对脚本友好的 CLI 形式提供。它随 App
+一同打包在 `Lokii.app/Contents/Resources/bin/lokii`，并在首次启动时由 App
+在后台静默建立 PATH 软链（优先 `/usr/local/bin`，回退 `~/.local/bin`），
+因此安装 App 后即可在终端直接使用 `lokii`，无需任何额外操作。
+（若这两个目录均不可写，则会静默跳过；此时请将 `~/.local/bin`
+等可写目录加入你的 `PATH`。）
+
+它复用 App 的配置文件（`~/.config/lokii/config.toml`）与持久化索引缓存
 （`~/.config/lokii/index.cache`），因此只要 App 建好索引，即可秒级搜索、
 无需重新扫描磁盘。
+
+开发期也可用 `make cli` 单独构建：
 
 ```bash
 make cli

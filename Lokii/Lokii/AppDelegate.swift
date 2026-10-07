@@ -32,6 +32,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         engine.initialize()
 
+        // 静默安装随包的命令行工具，使终端可直接调用 `lokii`
+        CommandLineInstaller.installIfNeeded()
+
         // 后台静默检查更新（延迟 3 秒，避免阻塞冷启动性能）
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
             Task { @MainActor in

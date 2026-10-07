@@ -169,6 +169,26 @@ build_app() {
     fi
     chmod +x "$bundle_dir/Contents/MacOS/Lokii"
 
+    # 编译 lokii 命令行工具并随包分发到 Contents/Resources/bin/
+    # 使安装 App 后可在终端直接调用（首次启动时由 App 静默建立 PATH 软链）
+    local cargo_profile="release"
+    local cargo_profile_flag="--release"
+    if [[ "$build_mode" == "debug" ]]; then
+        cargo_profile="debug"
+        cargo_profile_flag=""
+    fi
+    echo "==> 编译 lokii 命令行工具 ($cargo_profile, $rust_target)..."
+    cargo build --manifest-path "$repo_root/Cargo.toml" -p lokii-core --bin lokii \
+        --target "$rust_target" $cargo_profile_flag
+    local cli_bin="$repo_root/target/$rust_target/$cargo_profile/lokii"
+    if [[ ! -x "$cli_bin" ]]; then
+        echo "[FAIL] 未找到 CLI 可执行文件: $cli_bin" >&2
+        exit 1
+    fi
+    mkdir -p "$bundle_dir/Contents/Resources/bin"
+    cp "$cli_bin" "$bundle_dir/Contents/Resources/bin/lokii"
+    chmod +x "$bundle_dir/Contents/Resources/bin/lokii"
+
     # 拷贝多语言资源到标准 macOS Contents/Resources/
     cp -R "$repo_root/Lokii/Lokii/Resources/"* "$bundle_dir/Contents/Resources/"
 
@@ -227,6 +247,10 @@ EOF
             codesign --force --options runtime --timestamp \
                 --entitlements "$entitlements" --sign "$signing_identity" "$b"
         done
+        # 先签名嵌套的 CLI 可执行文件（Resources/bin/lokii），否则公证会失败
+        codesign --force --options runtime --timestamp \
+            --entitlements "$entitlements" --sign "$signing_identity" \
+            "$bundle_dir/Contents/Resources/bin/lokii"
         codesign --force --options runtime --timestamp \
             --entitlements "$entitlements" --sign "$signing_identity" \
             "$bundle_dir"
@@ -236,6 +260,8 @@ EOF
         find "$bundle_dir" -name "*.bundle" | while read -r b; do
             codesign --force --sign - "$b"
         done
+        # 先签名嵌套的 CLI 可执行文件（Resources/bin/lokii）
+        codesign --force --sign - "$bundle_dir/Contents/Resources/bin/lokii"
         codesign --force --sign - "$bundle_dir"
     fi
 
