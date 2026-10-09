@@ -134,6 +134,17 @@ final class SearchWindow: NSWindowController {
             self.focusSearchField()
             return true
         }
+        // ⌘1…⌘9 快速选中第 N 个结果；↓ 从搜索框跳到列表，↑ 由首行回到搜索框末尾。
+        // 这三个闭包内部都会先核对当前焦点状态，条件不满足时返回 false 交回 AppKit。
+        window.onSelectResult = { [weak self] index in
+            self?.selectResult(at: index) ?? false
+        }
+        window.onMoveDownFromSearchField = { [weak self] in
+            self?.moveFocusToResultsFromSearchField() ?? false
+        }
+        window.onMoveUpFromResults = { [weak self] in
+            self?.moveFocusToSearchFieldFromResults() ?? false
+        }
 
         setupUI()
         window.contentView?.wantsLayer = true
@@ -1370,6 +1381,56 @@ final class SearchWindow: NSWindowController {
             let end = (searchField.stringValue as NSString).length
             editor.selectedRange = NSRange(location: end, length: 0)
         }
+    }
+
+    /// ⌘1…⌘9：选中第 N 个结果，并把键盘焦点交给列表，紧接着 ↩ 就能打开它。
+    /// 序号超出当前结果数时给一声提示音，而不是把按键静默吞掉。
+    private func selectResult(at index: Int) -> Bool {
+        let row = index - 1
+        guard row < results.count else {
+            NSSound.beep()
+            return true
+        }
+        return focusResults(row: row)
+    }
+
+    /// ↓：焦点在搜索框、且插入点已经停在文本末尾时，把焦点交给结果列表。
+    /// 插入点还在文本中间则不拦截，交回 AppKit 处理，保留正常的编辑手感。
+    private func moveFocusToResultsFromSearchField() -> Bool {
+        guard let window, let searchField,
+              window.firstResponder === searchField.currentEditor(),
+              let editor = searchField.currentEditor(),
+              editor.selectedRange.length == 0,
+              editor.selectedRange.location == (searchField.stringValue as NSString).length,
+              !results.isEmpty else { return false }
+        // 已经有选中行就沿用它，避免把用户先前用 ⌘1…⌘9 挑好的那一条丢掉；
+        // 结果集变短后留下的越界旧选中行则退回首行。
+        let selected = tableView.selectedRow
+        let row = (selected >= 0 && selected < results.count) ? selected : 0
+        return focusResults(row: row)
+    }
+
+    /// ↑：焦点在结果列表、且当前停在第一个结果上时，回到搜索框并把光标放到末尾。
+    private func moveFocusToSearchFieldFromResults() -> Bool {
+        guard let window, isResultsFocused(window), tableView.selectedRow <= 0 else { return false }
+        focusSearchField()
+        return true
+    }
+
+    /// 选中第 `row` 行、滚进可视区域，并把键盘焦点交给列表；返回是否真的做了事。
+    @discardableResult
+    private func focusResults(row: Int) -> Bool {
+        guard let window, row >= 0, row < results.count else { return false }
+        window.makeFirstResponder(tableView)
+        tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        tableView.scrollRowToVisible(row)
+        return true
+    }
+
+    /// 键盘焦点是否落在结果列表里（表格本身或它的子视图）。
+    private func isResultsFocused(_ window: NSWindow) -> Bool {
+        guard let responder = window.firstResponder as? NSView else { return false }
+        return responder === tableView || responder.isDescendant(of: tableView)
     }
 
     /// 表格中选中条目对应的文件 URL（按行序）。
