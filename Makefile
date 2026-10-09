@@ -15,6 +15,16 @@ else
 $(error 不支持的架构: $(ARCH)，仅支持 arm64 / x86_64 / universal)
 endif
 
+# SwiftPM 不认 "universal" 这个架构名：通用二进制要显式列出双架构，
+# 并联到 bindings 生成的 target/universal 下的 fat 静态库。
+ifeq ($(ARCH),universal)
+SWIFT_ARCH := --arch arm64 --arch x86_64
+SWIFT_RUST_TARGET := universal
+else
+SWIFT_ARCH := --arch $(ARCH)
+SWIFT_RUST_TARGET := $(RUST_TARGET)
+endif
+
 all: build
 
 help:
@@ -22,7 +32,7 @@ help:
 	@echo "  make build [ARCH=...]    - 编译 Debug 版本 (默认: $(ARCH))"
 	@echo "  make release [ARCH=...]  - 编译 Release 版本 (默认: $(ARCH))"
 	@echo "  make bindings [ARCH=...] - 编译 Rust 核心并生成 UniFFI Swift 绑定"
-	@echo "  make test [ARCH=...]     - 运行 Rust 核心单测与 Swift 编译校验"
+	@echo "  make test [ARCH=...]     - 运行 Rust 核心单测、Swift 编译校验与快捷键回归"
 	@echo "  make check [ARCH=...]    - 运行 Rust 核心静态类型与目标检查"
 	@echo "  make package [ARCH=...]  - 打包构建 macOS DMG 安装镜像 (支持 arm64 / x86_64 / universal)"
 	@echo "  make cli [ARCH=...]      - 编译命令行搜索工具 (target/$(RUST_TARGET)/release/lokii)"
@@ -40,7 +50,8 @@ release:
 
 test: bindings
 	@cargo test --workspace --target $(RUST_TARGET)
-	@cd Lokii && LOKII_RUST_TARGET=$(RUST_TARGET) swift build --arch $(ARCH)
+	@cd Lokii && LOKII_RUST_TARGET=$(SWIFT_RUST_TARGET) swift build $(SWIFT_ARCH)
+	@swift tests/keyboard_maestro_handoff.swift
 
 check:
 	@cargo check --workspace --all-targets --target $(RUST_TARGET)

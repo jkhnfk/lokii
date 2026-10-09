@@ -273,6 +273,8 @@ build_app() {
     <string>13.0</string>
     <key>LSUIElement</key>
     <true/>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Lokii hands the selected item to Keyboard Maestro so the macro you set up can act on it. Lokii only sends this one command; it never reads anything back.</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSPrincipalClass</key>
