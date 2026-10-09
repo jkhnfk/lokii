@@ -133,6 +133,23 @@
 "search.ctx.revealInFinder" = "Reveal in Finder";
 "search.ctx.copyPath" = "Copy Path";
 "search.ctx.copyName" = "Copy Name";
+"search.ctx.launchBar" = "Send to LaunchBar";
+"search.ctx.keyboardMaestro" = "Send to Keyboard Maestro";
+"search.ctx.focusSearch" = "Focus Search Field";
+
+/* SearchWindow - LaunchBar hand-off */
+"search.launchBar.notInstalled" = "LaunchBar is not installed";
+"search.launchBar.failed" = "Could not hand the item to LaunchBar";
+
+/* SearchWindow - Keyboard Maestro hand-off */
+"search.keyboardMaestro.notInstalled" = "Keyboard Maestro is not installed";
+"search.keyboardMaestro.notAuthorized" = "Allow Lokii to control \"Keyboard Maestro Engine\" in System Settings → Privacy & Security → Automation";
+"search.keyboardMaestro.sending" = "Handing over to Keyboard Maestro…";
+"search.keyboardMaestro.done" = "Handed over to Keyboard Maestro";
+"search.keyboardMaestro.failed" = "Could not hand the item to Keyboard Maestro";
+
+/* SearchWindow - copy */
+"search.copiedPaths" = "Copied %ld path(s)";
 
 /* SearchWindow - table columns */
 "search.col.name" = "Name";

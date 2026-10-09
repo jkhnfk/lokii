@@ -121,6 +121,19 @@ final class SearchWindow: NSWindowController {
         window.onReturn = { [weak self] in
             self?.openSelected()
         }
+        // ⌘↩ 交给 LaunchBar，⇧↩ 交给 Keyboard Maestro，⌘F 回到搜索框。
+        // Tab 已交还 AppKit 默认的焦点切换行为。
+        window.onCommandReturn = { [weak self] in
+            self?.sendSelectionToLaunchBar() ?? false
+        }
+        window.onShiftReturn = { [weak self] in
+            self?.sendSelectionToKeyboardMaestro() ?? false
+        }
+        window.onCommandF = { [weak self] in
+            guard let self else { return false }
+            self.focusSearchField()
+            return true
+        }
 
         setupUI()
         window.contentView?.wantsLayer = true
@@ -364,12 +377,30 @@ final class SearchWindow: NSWindowController {
         rebuildButton.isEnabled = false
 
         // Context menu
+        // 注意：`NSMenuItem` 默认的 `keyEquivalentModifierMask` 是 ⌘，只有显式写出的
+        // 修饰键才与这里标称的快捷键一致；Open 不挂快捷键（↩ 由窗口的 keyDown 处理），
+        // 把 ⌘↩ 让给「用 LaunchBar 处理」。
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: L("search.ctx.open"), action: #selector(openSelected), keyEquivalent: "\r"))
+        menu.addItem(NSMenuItem(title: L("search.ctx.open"), action: #selector(openSelected), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: L("search.ctx.revealInFinder"), action: #selector(revealSelected), keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: L("search.ctx.copyPath"), action: #selector(copyPath), keyEquivalent: "c"))
         menu.addItem(NSMenuItem(title: L("search.ctx.copyName"), action: #selector(copyName), keyEquivalent: ""))
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(NSMenuItem(title: L("search.ctx.focusSearch"), action: #selector(focusSearchFieldFromMenu), keyEquivalent: "f"))
+        menu.addItem(NSMenuItem.separator())
+
+        // 交给外部 App 继续处理：⌘↩ → LaunchBar，⇧↩ → Keyboard Maestro
+        let launchBarItem = NSMenuItem(title: L("search.ctx.launchBar"),
+                                       action: #selector(sendToLaunchBar), keyEquivalent: "\r")
+        launchBarItem.keyEquivalentModifierMask = .command
+        menu.addItem(launchBarItem)
+
+        let keyboardMaestroItem = NSMenuItem(title: L("search.ctx.keyboardMaestro"),
+                                             action: #selector(sendToKeyboardMaestro), keyEquivalent: "\r")
+        keyboardMaestroItem.keyEquivalentModifierMask = .shift
+        menu.addItem(keyboardMaestroItem)
+
         tableView.menu = menu
     }
 
@@ -1124,6 +1155,9 @@ final class SearchWindow: NSWindowController {
 
     private var lastQuery: String = ""
 
+    /// 状态栏临时提示的复位任务：连续提示时只保留最后一次。
+    private var statusResetWorkItem: DispatchWorkItem?
+
     @objc private func searchChanged() {
         let query = searchField.stringValue
         guard query != lastQuery else { return }
@@ -1137,8 +1171,7 @@ final class SearchWindow: NSWindowController {
             tableView.reloadData()
             countLabel.stringValue = ""
             pathBar.url = nil
-            let stats = engine.stats
-            statusLabel.stringValue = stats.isReady ? "\(formatCount(stats.totalCount)) indexed" : L("search.indexing")
+            refreshIdleStatus()
             return
         }
 
@@ -1224,6 +1257,27 @@ final class SearchWindow: NSWindowController {
         NSPasteboard.general.setString(results[row].path, forType: .string)
     }
 
+    /// ⌘C 在主窗口按下时的实际处理（由 AppDelegate 的「编辑 → 拷贝」菜单项转发过来）。
+    ///
+    /// 之所以绕这一圈：搜索框有焦点时，field editor 自己实现了 `copy:`，
+    /// 主菜单原来的「拷贝」项会先被它接管——没有选中文本时静默无动作，
+    /// 这正是「必须先右键再按 ⌘C 才能复制路径」的原因。改用本方法作为菜单项
+    /// 的 action 后不再和 NSTextView 抢 `copy:`，最后再由调用方把文本拷贝
+    /// 转发回响应链。
+    ///
+    /// 返回 `false` 表示这次不该处理（搜索框里有选中文字，或没有选中条目）。
+    func copySelectedPathsToPasteboard() -> Bool {
+        if let editor = window?.firstResponder as? NSTextView, editor.selectedRange().length > 0 {
+            return false
+        }
+        let paths = selectedURLs().map(\.path)
+        guard !paths.isEmpty else { return false }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(paths.joined(separator: "\n"), forType: .string)
+        flashStatus(String(format: L("search.copiedPaths"), paths.count))
+        return true
+    }
+
     @objc private func copyName() {
         let row = tableView.selectedRow
         guard row >= 0, row < results.count else { return }
@@ -1231,10 +1285,124 @@ final class SearchWindow: NSWindowController {
         NSPasteboard.general.setString(results[row].name, forType: .string)
     }
 
+    /// Context-menu entry point: hand the selection over to LaunchBar (⌘↩).
+    @objc private func sendToLaunchBar() {
+        _ = sendSelectionToLaunchBar()
+    }
+
+    /// Hand the selected result(s) to LaunchBar so the user can pick a follow-up
+    /// action there (⌘↩, or the context menu). Returns `false` when nothing was
+    /// handed over, so the caller can fall back to AppKit's default behaviour.
+    @discardableResult
+    private func sendSelectionToLaunchBar() -> Bool {
+        guard LaunchBar.isInstalled else {
+            statusLabel.stringValue = L("search.launchBar.notInstalled")
+            NSSound.beep()
+            return false
+        }
+
+        let urls = selectedURLs()
+        guard !urls.isEmpty else {
+            NSSound.beep()
+            return false
+        }
+
+        guard LaunchBar.send(urls: urls) else {
+            statusLabel.stringValue = L("search.launchBar.failed")
+            NSSound.beep()
+            return false
+        }
+        return true
+    }
+
+    /// Context-menu entry point: hand the selection over to Keyboard Maestro (⇧↩).
+    @objc private func sendToKeyboardMaestro() {
+        _ = sendSelectionToKeyboardMaestro()
+    }
+
+    /// ⇧↩（或右键菜单）：把选中项交给 Keyboard Maestro 的宏继续处理。
+    ///
+    /// 路径既作为 `do script` 的参数传入（宏里用 `%TriggerValue%` 取），
+    /// 也写进 KM 变量 `LokiiPath` / `LokiiPaths`，具体见 `KeyboardMaestro`。
+    @discardableResult
+    private func sendSelectionToKeyboardMaestro() -> Bool {
+        guard KeyboardMaestro.isInstalled else {
+            statusLabel.stringValue = L("search.keyboardMaestro.notInstalled")
+            NSSound.beep()
+            return false
+        }
+
+        let urls = selectedURLs()
+        guard !urls.isEmpty else {
+            NSSound.beep()
+            return false
+        }
+
+        // KM 的 `do script` 会等宏执行完才返回，宏里可能带等待/交互动作，
+        // 放在主线程会把界面卡住，所以丢到后台队列去发。
+        statusLabel.stringValue = L("search.keyboardMaestro.sending")
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let outcome = Result { try KeyboardMaestro.handoff(paths: urls) }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch outcome {
+                case .success(let returned):
+                    // 宏里如果有 Return 动作，其返回值直接显示出来，方便调试宏
+                    self.flashStatus(returned ?? L("search.keyboardMaestro.done"))
+                case .failure(let error):
+                    self.statusLabel.stringValue = error.localizedDescription
+                    NSSound.beep()
+                }
+            }
+        }
+        return true
+    }
+
+    /// ⌘F（或右键菜单）：把焦点送回搜索框，光标停在文本末尾，方便接着改查询。
+    @objc private func focusSearchFieldFromMenu() {
+        focusSearchField()
+    }
+
+    func focusSearchField() {
+        guard let window, let searchField else { return }
+        window.makeFirstResponder(searchField)
+        if let editor = searchField.currentEditor() {
+            let end = (searchField.stringValue as NSString).length
+            editor.selectedRange = NSRange(location: end, length: 0)
+        }
+    }
+
+    /// 表格中选中条目对应的文件 URL（按行序）。
+    private func selectedURLs() -> [URL] {
+        tableView.selectedRowIndexes.compactMap { row in
+            guard row >= 0, row < results.count else { return nil }
+            return URL(fileURLWithPath: results[row].path)
+        }
+    }
+
     // MARK: - Helpers
 
     private func formatCount(_ n: UInt64) -> String {
         Self.countFormatter.string(from: NSNumber(value: n)) ?? "\(n)"
+    }
+
+    /// 底部状态栏的临时提示：2 秒后恢复成空闲状态。
+    private func flashStatus(_ message: String) {
+        statusLabel.stringValue = message
+        statusResetWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            self?.refreshIdleStatus()
+        }
+        statusResetWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: item)
+    }
+
+    /// 空闲（搜索框为空）时底部显示的索引进度/总数。
+    private func refreshIdleStatus() {
+        let stats = engine.stats
+        statusLabel.stringValue = stats.isReady
+            ? "\(formatCount(stats.totalCount)) indexed"
+            : L("search.indexing")
     }
 
     private func iconForFile(at path: String, isDir: Bool) -> NSImage {

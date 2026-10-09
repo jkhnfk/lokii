@@ -4,5 +4,9 @@
 <dict>
 	<key>com.apple.security.app-sandbox</key>
 	<false/>
+	<!-- 向 Keyboard Maestro Engine 发 AppleScript（⇧↩ 交接宏）需要这项；
+	     受硬化运行时（codesign --options runtime）限制，缺它会直接被拒 -1743。 -->
+	<key>com.apple.security.automation.apple-events</key>
+	<true/>
 </dict>
 </plist>

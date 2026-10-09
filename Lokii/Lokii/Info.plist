@@ -28,5 +28,7 @@
     <string>NSApplication</string>
     <key>NSMainNibFile</key>
     <string></string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Lokii hands the selected item to Keyboard Maestro so the macro you set up can act on it. Lokii only sends this one command; it never reads anything back.</string>
 </dict>
 </plist>

@@ -133,6 +133,23 @@
 "search.ctx.revealInFinder" = "在访达中显示";
 "search.ctx.copyPath" = "拷贝路径";
 "search.ctx.copyName" = "拷贝名称";
+"search.ctx.launchBar" = "用 LaunchBar 处理";
+"search.ctx.keyboardMaestro" = "用 Keyboard Maestro 处理";
+"search.ctx.focusSearch" = "回到搜索框";
+
+/* SearchWindow - LaunchBar hand-off */
+"search.launchBar.notInstalled" = "未安装 LaunchBar";
+"search.launchBar.failed" = "无法把条目交给 LaunchBar";
+
+/* SearchWindow - Keyboard Maestro hand-off */
+"search.keyboardMaestro.notInstalled" = "未安装 Keyboard Maestro";
+"search.keyboardMaestro.notAuthorized" = "请在「系统设置 → 隐私与安全性 → 自动化」中允许 Lokii 控制「Keyboard Maestro Engine」";
+"search.keyboardMaestro.sending" = "正在交给 Keyboard Maestro…";
+"search.keyboardMaestro.done" = "已交给 Keyboard Maestro";
+"search.keyboardMaestro.failed" = "无法把条目交给 Keyboard Maestro";
+
+/* SearchWindow - copy */
+"search.copiedPaths" = "已拷贝 %ld 个路径";
 
 /* SearchWindow - table columns */
 "search.col.name" = "名称";

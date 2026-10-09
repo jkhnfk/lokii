@@ -158,7 +158,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let editMenuItem = NSMenuItem()
         let editMenu = NSMenu(title: L("menu.edit"))
         editMenu.addItem(withTitle: L("menu.cut"), action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        editMenu.addItem(withTitle: L("menu.copy"), action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        // 拷贝：搜索窗口在前时复制选中条目的路径，其余情况退回 AppKit
+        // 标准的文本拷贝（见 `copySelectedPath`）。这样搜索框聚焦时 ⌘C
+        // 也能复制路径，而不是被 field editor 静默吃掉。
+        editMenu.addItem(withTitle: L("menu.copy"), action: #selector(copySelectedPath(_:)), keyEquivalent: "c")
         editMenu.addItem(withTitle: L("menu.paste"), action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: L("menu.selectAll"), action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editMenuItem.submenu = editMenu
@@ -184,6 +187,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             mainWindow?.showWindow(nil)
             NSApp.activate(ignoringOtherApps: true)
         }
+    }
+
+    /// 主菜单「编辑 → 拷贝」（⌘C）的 action。
+    ///
+    /// 搜索窗口在前时优先复制选中条目的路径（多选时按行序、换行分隔）；
+    /// 搜索框里选中了文字、或前台不是搜索窗口（例如偏好设置里的输入框），
+    /// 就把 `copy:` 交回响应链，保持 AppKit 原本的文本拷贝行为。
+    ///
+    /// 用自定义 action 而不是原来的 `NSText.copy(_:)`，是因为 `NSTextView`
+    /// （搜索框的 field editor）也实现了 `copy:`，两者会互相抢这个菜单项：
+    /// 搜索框聚焦且没有选中文本时，⌘C 会被它接走并静默无动作。
+    @objc private func copySelectedPath(_ sender: Any?) {
+        if let searchWindow = mainWindow, let window = searchWindow.window,
+           NSApp.keyWindow === window,
+           searchWindow.copySelectedPathsToPasteboard() {
+            return
+        }
+        NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: sender)
     }
 
     @objc private func showAboutPanel() {
