@@ -39,10 +39,32 @@ Lokii is a native macOS instant file search tool engineered for developer-grade 
 | **Instant As-You-Type Search** | Sub-millisecond response latency across 500,000+ files with low memory footprint (< 100MB). |
 | **Multi-Mode Query Engine** | Intelligent mode detection supporting substring, wildcard (`*`, `?`), regular expression (`^...$`), and fuzzy matching. |
 | **Real-Time FSEvents Stream** | Multi-channel FSEvents event stream with dirty-queue debouncing to keep the index in sync without high CPU overhead. |
+| **Finder-Style Folder Browsing** | Press `Space` on a folder to browse it in place, `⌘↓` to descend, `⌘↑` to go back up, `Esc` to return to your search — the search field clears on entry so you always see the full directory listing. |
+| **Quick Look Preview** | Press `Space` on a file to preview it in the system Quick Look panel, no app launch required. |
+| **Type-to-Filter** | With the result list focused, just start typing letters or digits to jump back to the search field and filter — fully compatible with IMEs like Rime for CJK input. |
 | **Native AppKit Density** | High-density virtualized table view, native macOS file icons, zebra striping, and spring-damped micro-interactions. |
-| **Keyboard-First Workflow** | Global shortcut toggle (`⌘⇧Space`), arrow navigation — `↓` drops from the end of a query straight into the result list and `↑` on the first result returns to the search field, `Enter` to open, `⌘1`–`⌘9` to jump to the Nth result, `Space` for Finder-style Quick Look (`⌘↓` opens the selected folder in place, `⌘↑` walks back up), `⌘C` to copy path, `⌘↩` to hand the selection to LaunchBar, `⇧↩` to run a Keyboard Maestro macro on it, `⌘F` to refocus the search field, and `Esc` to step back out of a folder (or hide the window once back at search). |
 | **Persistent Binary Cache** | Bitcode-serialized index cache that survives system restarts for instant hot-start readiness. |
 | **Native Settings & FDA** | Native Preferences window with custom search roots, exclusion rules, theme switching (Light/Dark/System), and interactive Full Disk Access setup. |
+
+### Keyboard Shortcuts
+
+| Key | Action |
+| :--- | :--- |
+| `⌘⇧Space` | Toggle the search window (global hotkey) |
+| type to search | As-you-type query in the search field |
+| `↓` | Move focus from the search field into the result list |
+| `↑` | Move focus from the first result back to the search field |
+| `Enter` / `Return` | Open the selected item |
+| `⌘1`–`⌘9` | Jump to the Nth result |
+| `Space` | Preview a file (Quick Look) / browse a folder in place |
+| `⌘↓` | Enter the selected folder |
+| `⌘↑` | Go up one level (exits browsing back to search at the top) |
+| `Esc` | Exit folder browsing back to search / hide the window |
+| `a–z`, `0–9`, punctuation | With the result list focused, start typing to filter |
+| `⌘C` | Copy the full path |
+| `⌘↩` | Hand the selection to LaunchBar |
+| `⇧↩` | Run a Keyboard Maestro macro on the selection |
+| `⌘F` | Refocus the search field |
 
 ## Privacy
 
