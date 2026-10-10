@@ -128,6 +128,14 @@
 "search.buildingIndex" = "Building Index...";
 "search.scanningFiles" = "Scanning files...";
 
+/* SearchWindow - folder browsing (Space / ⌘↓ / ⌘↑) */
+"search.browseCount" = "%@ items";
+"search.browseCountFiltered" = "%@ of %@ items";
+"search.browseTruncated" = "first %@ shown";
+"search.browseStatus" = "%@ — Space previews a file, ⌘↓ opens a folder, ⌘↑ goes up";
+"search.browsePlaceholder" = "Filter in this folder...";
+"search.browseUnreadable" = "Could not read this folder";
+
 /* SearchWindow - context menu */
 "search.ctx.open" = "Open";
 "search.ctx.revealInFinder" = "Reveal in Finder";

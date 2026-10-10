@@ -53,6 +53,7 @@ test: bindings
 	@cd Lokii && LOKII_RUST_TARGET=$(SWIFT_RUST_TARGET) swift build $(SWIFT_ARCH)
 	@swift tests/keyboard_maestro_handoff.swift
 	@swift tests/keyboard_shortcuts.swift
+	@swift tests/space_preview_browse.swift
 
 check:
 	@cargo check --workspace --all-targets --target $(RUST_TARGET)

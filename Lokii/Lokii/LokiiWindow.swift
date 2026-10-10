@@ -9,6 +9,10 @@ import AppKit
 ///   ⌘F      把焦点送回搜索框
 ///   ⌘1…⌘9   快速选中第 N 个结果
 ///   ↓ / ↑   搜索框与结果列表之间的焦点接力（是否消费由闭包按当前焦点状态决定）
+///   ⌘↓      进入选中的文件夹（浏览模式下也用于继续下钻）
+///   ⌘↑      返回上一级目录；已在最上层时退出浏览模式
+///   Space   Finder 式 Quick Look：选中文件弹预览，选中文件夹就地展开浏览
+///           （是否消费由闭包按当前焦点状态决定——搜索框里仍然是空格字符）
 ///
 /// 判定时忽略会残留的 ⌥（见 `ignorableModifiers`）：全局热键 ⌥⌘Space 用过后，系统
 /// 修饰状态里可能残留一个「按着没松」的 ⌥，此时按 ⌘2 送到窗口的其实是 ⌘⌥2、按 ↓
@@ -30,6 +34,10 @@ final class LokiiWindow: NSWindow {
         case selectResult(Int)   // ⌘1…⌘9，序号从 1 起算
         case moveDown            // ↓
         case moveUp              // ↑
+        case commandDown         // ⌘↓：进入选中的文件夹
+        case commandUp           // ⌘↑：返回上一级目录
+        case preview             // Space：Quick Look 预览 / 展开文件夹
+        case typeCharacter(String)  // 无修饰键的可打印字符：列表聚焦时想输入文字筛选
     }
 
     /// 参与判定的修饰键：caps lock 之类非交互修饰键不计入。
@@ -38,14 +46,17 @@ final class LokiiWindow: NSWindow {
     ///
     /// 应用的全局热键是 ⌥⌘Space，Carbon 注册的热键会吞掉 ⌥ 的抬起事件：热键用过之后，
     /// 系统修饰状态里会残留一个「按着没松」的 ⌥，此后每个按键事件都多带 ⌥。本窗口的
-    /// 快捷键都不与 ⌥ 组合（⌘↩ / ⇧↩ / ⌘F / ⌘1…⌘9 / ↓ / ↑），把 ⌥ 当作无关修饰键，
-    /// 既让 ⌘⌥2 等同于 ⌘2，也顺手修好 ⌥↓、⌥⇧↩ 这类被残留 ⌥ 污染的按键。
+    /// 快捷键都不与 ⌥ 组合（⌘↩ / ⇧↩ / ⌘F / ⌘1…⌘9 / ⌘↓ / ⌘↑ / ↓ / ↑ / Space），把 ⌥ 当作
+    /// 无关修饰键，既让 ⌘⌥2 等同于 ⌘2，也顺手修好 ⌥↓、⌥⇧↩ 这类被残留 ⌥ 污染的按键。
     /// ⇧ 与 ⌃ 不在忽略之列——它们用来区分不同组合（⌘↩ 与 ⇧↩、⌘F 与 ⌘⇧F）。
     static let ignorableModifiers: NSEvent.ModifierFlags = [.option]
     /// ⌘1…⌘9 快速选中：一位数字键最多覆盖前 9 个结果。
     static let quickSelectRange = 1...9
 
     var onEscape: (() -> Void)?
+    /// Escape 在 sendEvent 阶段的提前拦截：返回 `true` 表示事件已被消费（例如退出浏览模式）。
+    /// 放 sendEvent 而非 keyDown，是因为搜索框的 field editor 会先吃掉 Escape。
+    var onEscapeIntercept: (() -> Bool)?
     var onReturn: (() -> Void)?
     /// 组合键的处理闭包：返回 `true` 表示事件已消费、不再继续分发；
     /// 返回 `false` 则退回 AppKit 默认行为。
@@ -58,15 +69,43 @@ final class LokiiWindow: NSWindow {
     var onMoveDownFromSearchField: (() -> Bool)?
     /// ↑：焦点在结果列表且停在第一个结果上时触发。
     var onMoveUpFromResults: (() -> Bool)?
+    /// ⌘↓：进入选中的文件夹。
+    var onCommandDown: (() -> Bool)?
+    /// ⌘↑：返回上一级目录。
+    var onCommandUp: (() -> Bool)?
+    /// Space：预览选中文件 / 展开选中文件夹。
+    var onPreview: (() -> Bool)?
+    /// 无修饰键的可打印字符：结果列表聚焦时想输入文字筛选，把字符交给窗口聚焦搜索框。
+    var onTypeCharacter: ((String) -> Bool)?
 
     override func sendEvent(_ event: NSEvent) {
-        if event.type == .keyDown, handleShortcut(event) { return }
+        if event.type == .keyDown {
+            // Escape 优先拦截：浏览模式下退出文件夹并消费事件；不消费则继续默认分发
+            // （搜索框清空文字、或冒泡到 keyDown 隐藏窗口）。放 sendEvent 是因为
+            // 搜索框的 field editor 会先吞掉 Escape，等 keyDown 再处理就来不及了。
+            if event.keyCode == 53, onEscapeIntercept?() == true { return }
+            if handleShortcut(event) { return }
+        }
         super.sendEvent(event)
     }
 
     /// 真正参与匹配的修饰键：滤掉非交互修饰键（caps lock 等）与可忽略的 ⌥。
     static func matchingModifiers(of event: NSEvent) -> NSEvent.ModifierFlags {
         event.modifierFlags.intersection(interactiveModifiers).subtracting(ignorableModifiers)
+    }
+
+    /// 无修饰键时可打印的「普通字符」（字母、数字、标点），用于「列表聚焦时打字即筛选」。
+    /// 任何交互修饰键（⌘/⇧/⌃/⌥）参与都不算——⌥ 会改变产生的字符，不能当作纯打字；
+    /// 控制字符（Tab、Esc、退格…）与功能键（方向键、F 键等 private use area）也不算。
+    static func printableCharacter(of event: NSEvent) -> String? {
+        guard event.modifierFlags.intersection(interactiveModifiers).isEmpty,
+              let characters = event.characters,
+              !characters.isEmpty,
+              let scalar = characters.unicodeScalars.first else { return nil }
+        if CharacterSet.controlCharacters.contains(scalar) { return nil }
+        if scalar.value < 0x20 || scalar.value == 0x7F { return nil }
+        if (0xE000...0xF8FF).contains(scalar.value) { return nil }
+        return characters
     }
 
     /// 把一次 keyDown 事件翻译成窗口关心的快捷键；返回 `nil` 表示不拦截。
@@ -82,11 +121,16 @@ final class LokiiWindow: NSWindow {
             if modifiers == .command { return .commandReturn }
             if modifiers == .shift { return .shiftReturn }
             return nil
+        case 49: // Space：Finder 式 Quick Look / 展开文件夹
+            return modifiers.isEmpty ? .preview : nil
         case 125: // ↓
-            return modifiers.isEmpty ? .moveDown : nil
+            if modifiers.isEmpty { return .moveDown }
+            return modifiers == .command ? .commandDown : nil
         case 126: // ↑
-            return modifiers.isEmpty ? .moveUp : nil
+            if modifiers.isEmpty { return .moveUp }
+            return modifiers == .command ? .commandUp : nil
         default:
+            if let characters = printableCharacter(of: event) { return .typeCharacter(characters) }
             guard modifiers == .command,
                   let characters = event.charactersIgnoringModifiers?.lowercased() else { return nil }
             if characters == "f" { return .commandF }
@@ -103,6 +147,10 @@ final class LokiiWindow: NSWindow {
         case .selectResult(let index): return onSelectResult?(index) ?? false
         case .moveDown: return onMoveDownFromSearchField?() ?? false
         case .moveUp: return onMoveUpFromResults?() ?? false
+        case .commandDown: return onCommandDown?() ?? false
+        case .commandUp: return onCommandUp?() ?? false
+        case .preview: return onPreview?() ?? false
+        case .typeCharacter(let characters): return onTypeCharacter?(characters) ?? false
         case nil: return false
         }
     }

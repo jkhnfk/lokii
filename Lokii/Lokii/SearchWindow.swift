@@ -1,4 +1,5 @@
 import AppKit
+import QuickLookUI
 import UniformTypeIdentifiers
 
 /// Blocks all mouse and keyboard events so the UI beneath is not interactive.
@@ -38,6 +39,28 @@ final class SearchWindow: NSWindowController {
     private var statusLabel: NSTextField!
     private var searchWorkItem: DispatchWorkItem?
     private var currentMode: FfiSearchMode = .auto
+
+    // 文件夹浏览（Space 展开 / ⌘↓ 下钻 / ⌘↑ 返回上一级）
+    /// 当前正在浏览的目录；`nil` 表示列表内容来自搜索结果。
+    private var browsingFolder: String?
+    /// 当前目录的完整条目（已按表格排序描述符排好），过滤前的全集。
+    private var browseAllEntries: [BrowseEntry] = []
+    /// 过滤后真正显示在表格里的条目。
+    private var browseEntries: [BrowseEntry] = []
+    /// 条目数触顶被截断（超大目录只列前 `FolderBrowse.defaultMaxEntries` 条）。
+    private var browseTruncated = false
+    /// 进入浏览模式前的搜索结果，一路 ⌘↑ 退到最顶层时原样恢复。
+    private var savedSearch: SavedSearch?
+    /// 弹 Quick Look 面板时选中的那批 URL：表格选中行被清掉后仍要能翻页预览。
+    private var previewItemsFallback: [URL] = []
+
+    /// 进入浏览模式时暂存的搜索结果快照。
+    private struct SavedSearch {
+        let results: [FfiSearchResult]
+        let query: String
+        let count: String
+        let status: String
+    }
 
     // Info panel
     private var infoPanelView: NSView!
@@ -118,6 +141,13 @@ final class SearchWindow: NSWindowController {
         window.onEscape = { [weak self] in
             self?.hideWindowWithAnimation()
         }
+        // Escape 在 sendEvent 阶段拦截：浏览模式下退出文件夹，赶在搜索框 field editor
+        // 吃掉 Escape 之前消费掉；不在浏览模式时放行，Esc 继续走清空搜索框/隐藏窗口。
+        window.onEscapeIntercept = { [weak self] in
+            guard let self, self.isBrowsing else { return false }
+            self.exitBrowse()
+            return true
+        }
         window.onReturn = { [weak self] in
             self?.openSelected()
         }
@@ -144,6 +174,22 @@ final class SearchWindow: NSWindowController {
         }
         window.onMoveUpFromResults = { [weak self] in
             self?.moveFocusToSearchFieldFromResults() ?? false
+        }
+        // Space 预览文件 / 展开文件夹，⌘↓ 进入文件夹，⌘↑ 返回上一级。
+        // 这三个闭包同样先核对焦点与选中状态，条件不满足时返回 false 交回 AppKit
+        // （搜索框里的空格仍然是空格字符，⌘↓ 仍然是表格自己的快捷键）。
+        window.onPreview = { [weak self] in
+            self?.handleSpace() ?? false
+        }
+        window.onCommandDown = { [weak self] in
+            self?.enterSelectedFolder() ?? false
+        }
+        window.onCommandUp = { [weak self] in
+            self?.leaveFolder() ?? false
+        }
+        // 无修饰键的普通字符：列表聚焦时打字即筛选，聚焦搜索框并输入该字符。
+        window.onTypeCharacter = { [weak self] characters in
+            self?.typeAheadFilter(characters) ?? false
         }
 
         setupUI()
@@ -202,7 +248,10 @@ final class SearchWindow: NSWindowController {
 
     @objc private func hideWindowWithAnimation() {
         guard let window = window, window.isVisible else { return }
-        
+
+        // 关窗顺手收起 Quick Look 面板，免得它孤零零留在屏幕上
+        dismissPreview()
+
         // Remove scale pop on close for cleaner exit
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.15
@@ -581,15 +630,13 @@ final class SearchWindow: NSWindowController {
     }
 
     private func updateInfoPanel() {
-        let row = tableView.selectedRow
-        guard row >= 0, row < results.count else {
+        guard let result = resultAt(row: tableView.selectedRow) else {
             infoIconView.image = nil
             infoNameLabel.stringValue = ""
             infoKindLabel.stringValue = ""
             for (_, v) in infoDetailLabels { v.stringValue = "—" }
             return
         }
-        let result = results[row]
 
         let icon = NSWorkspace.shared.icon(forFile: result.path)
         icon.size = NSSize(width: 64, height: 64)
@@ -683,6 +730,8 @@ final class SearchWindow: NSWindowController {
         let source = note.userInfo?["source"] as? String ?? ""
         if indexingState == .rebuilding && source != "rebuild" { return }
         if indexingState == .initializing && source == "rebuild" { return }
+        // 浏览模式下的状态栏属于当前目录，索引进度别来插一脚
+        guard !isBrowsing else { return }
 
         let count = note.userInfo?["scannedFiles"] as? UInt64 ?? 0
         let formatted = formatCount(count)
@@ -704,10 +753,10 @@ final class SearchWindow: NSWindowController {
         switch indexingState {
         case .initializing:
             guard source != "rebuild" else {
-                statusLabel.stringValue = "\(formatCount(total)) indexed"
+                setIdleStatus(total)
                 return
             }
-            statusLabel.stringValue = "\(formatCount(total)) indexed"
+            setIdleStatus(total)
             if isColdStart {
                 hideLoadingOverlay()
             } else {
@@ -717,21 +766,21 @@ final class SearchWindow: NSWindowController {
             indexingState = .idle
         case .rebuilding:
             guard source == "rebuild" else {
-                statusLabel.stringValue = "\(formatCount(total)) indexed"
+                setIdleStatus(total)
                 return
             }
-            statusLabel.stringValue = "\(formatCount(total)) indexed"
+            setIdleStatus(total)
             hideInlineProgress()
             stopRebuildButtonAnimation()
             indexingState = .idle
         case .idle:
-            statusLabel.stringValue = "\(formatCount(total)) indexed"
+            setIdleStatus(total)
         }
     }
 
     @objc private func onIndexUpdated(_ note: Notification) {
         let total = note.userInfo?["total"] as? UInt64 ?? 0
-        statusLabel.stringValue = "\(formatCount(total)) indexed"
+        setIdleStatus(total)
     }
 
     @objc private func onStartupMode(_ note: Notification) {
@@ -976,7 +1025,7 @@ final class SearchWindow: NSWindowController {
         ])
 
         // Change search field placeholder (per D-08)
-        searchField.placeholderString = L("search.indexingIncomplete")
+        refreshSearchPlaceholder()
     }
 
     private func hideInlineProgress() {
@@ -991,7 +1040,7 @@ final class SearchWindow: NSWindowController {
         inlineProgressIndicator = nil
 
         // Restore search field placeholder (per D-09)
-        searchField.placeholderString = originalSearchPlaceholder
+        refreshSearchPlaceholder()
     }
 
     // MARK: - Toast
@@ -1175,6 +1224,12 @@ final class SearchWindow: NSWindowController {
         lastQuery = query
         searchWorkItem?.cancel()
 
+        // 浏览模式下搜索框改当「当前目录内过滤器」用：不发起索引查询，只筛当前条目。
+        if isBrowsing {
+            applyBrowseFilter()
+            return
+        }
+
         if query.isEmpty {
             results = []
             iconCache.removeAll()
@@ -1206,18 +1261,12 @@ final class SearchWindow: NSWindowController {
             let response = self.engine.search(query: query, mode: mode)
             DispatchQueue.main.async {
                 self.isSearching = false
+                // 搜索期间用户可能已经 Space 展开了一个文件夹：这批结果已经过期，别覆盖目录内容。
+                guard !self.isBrowsing else { return }
                 self.results = response.results
                 self.iconCache.removeAll()
                 self.tableView.sortDescriptors = []  // Reset sort to relevance order (D-06)
-                
-                // Crossfade animation for list refresh
-                let transition = CATransition()
-                transition.type = .fade
-                transition.duration = 0.15
-                transition.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                self.tableView.layer?.add(transition, forKey: "fade")
-                
-                self.tableView.reloadData()
+                self.reloadResultsWithFade()
 
                 if let error = response.error {
                     self.countLabel.stringValue = error
@@ -1244,28 +1293,24 @@ final class SearchWindow: NSWindowController {
     }
 
     @objc private func tableDoubleClicked() {
-        let row = tableView.clickedRow
-        guard row >= 0, row < results.count else { return }
-        engine.openFile(path: results[row].path)
+        guard let result = resultAt(row: tableView.clickedRow) else { return }
+        engine.openFile(path: result.path)
     }
 
     @objc private func openSelected() {
-        let row = tableView.selectedRow
-        guard row >= 0, row < results.count else { return }
-        engine.openFile(path: results[row].path)
+        guard let result = resultAt(row: tableView.selectedRow) else { return }
+        engine.openFile(path: result.path)
     }
 
     @objc private func revealSelected() {
-        let row = tableView.selectedRow
-        guard row >= 0, row < results.count else { return }
-        engine.revealInFinder(path: results[row].path)
+        guard let result = resultAt(row: tableView.selectedRow) else { return }
+        engine.revealInFinder(path: result.path)
     }
 
     @objc private func copyPath() {
-        let row = tableView.selectedRow
-        guard row >= 0, row < results.count else { return }
+        guard let result = resultAt(row: tableView.selectedRow) else { return }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(results[row].path, forType: .string)
+        NSPasteboard.general.setString(result.path, forType: .string)
     }
 
     /// ⌘C 在主窗口按下时的实际处理（由 AppDelegate 的「编辑 → 拷贝」菜单项转发过来）。
@@ -1290,10 +1335,9 @@ final class SearchWindow: NSWindowController {
     }
 
     @objc private func copyName() {
-        let row = tableView.selectedRow
-        guard row >= 0, row < results.count else { return }
+        guard let result = resultAt(row: tableView.selectedRow) else { return }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(results[row].name, forType: .string)
+        NSPasteboard.general.setString(result.name, forType: .string)
     }
 
     /// Context-menu entry point: hand the selection over to LaunchBar (⌘↩).
@@ -1383,11 +1427,22 @@ final class SearchWindow: NSWindowController {
         }
     }
 
+    /// 列表聚焦时按普通字符：当作「开始筛选」，聚焦搜索框后把按键交回 AppKit，
+    /// 让 field editor 走正常输入流程——Rime 等输入法能接管组合输入（拼音候选），
+    /// 而不是被直接打成英文输出。焦点不在结果列表时同样返回 false 交回默认行为。
+    private func typeAheadFilter(_ characters: String) -> Bool {
+        guard let window, isResultsFocused(window) else { return false }
+        // 只聚焦、不直接 insertText：insertText 会绕过输入法上下文，把字符当英文提交。
+        // 返回 false 让事件继续分发到刚聚焦的 field editor，由输入法正常接管。
+        focusSearchField()
+        return false
+    }
+
     /// ⌘1…⌘9：选中第 N 个结果，并把键盘焦点交给列表，紧接着 ↩ 就能打开它。
     /// 序号超出当前结果数时给一声提示音，而不是把按键静默吞掉。
     private func selectResult(at index: Int) -> Bool {
         let row = index - 1
-        guard row < results.count else {
+        guard row < rowCount else {
             NSSound.beep()
             return true
         }
@@ -1402,11 +1457,11 @@ final class SearchWindow: NSWindowController {
               let editor = searchField.currentEditor(),
               editor.selectedRange.length == 0,
               editor.selectedRange.location == (searchField.stringValue as NSString).length,
-              !results.isEmpty else { return false }
+              rowCount > 0 else { return false }
         // 已经有选中行就沿用它，避免把用户先前用 ⌘1…⌘9 挑好的那一条丢掉；
         // 结果集变短后留下的越界旧选中行则退回首行。
         let selected = tableView.selectedRow
-        let row = (selected >= 0 && selected < results.count) ? selected : 0
+        let row = (selected >= 0 && selected < rowCount) ? selected : 0
         return focusResults(row: row)
     }
 
@@ -1420,7 +1475,7 @@ final class SearchWindow: NSWindowController {
     /// 选中第 `row` 行、滚进可视区域，并把键盘焦点交给列表；返回是否真的做了事。
     @discardableResult
     private func focusResults(row: Int) -> Bool {
-        guard let window, row >= 0, row < results.count else { return false }
+        guard let window, row >= 0, row < rowCount else { return false }
         window.makeFirstResponder(tableView)
         tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         tableView.scrollRowToVisible(row)
@@ -1436,8 +1491,8 @@ final class SearchWindow: NSWindowController {
     /// 表格中选中条目对应的文件 URL（按行序）。
     private func selectedURLs() -> [URL] {
         tableView.selectedRowIndexes.compactMap { row in
-            guard row >= 0, row < results.count else { return nil }
-            return URL(fileURLWithPath: results[row].path)
+            guard let result = resultAt(row: row) else { return nil }
+            return URL(fileURLWithPath: result.path)
         }
     }
 
@@ -1458,8 +1513,19 @@ final class SearchWindow: NSWindowController {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: item)
     }
 
+    /// 状态栏的「已索引 N 项」文案；浏览模式下让位给目录说明。
+    private func setIdleStatus(_ total: UInt64) {
+        guard !isBrowsing else { return }
+        statusLabel.stringValue = "\(formatCount(total)) indexed"
+    }
+
     /// 空闲（搜索框为空）时底部显示的索引进度/总数。
     private func refreshIdleStatus() {
+        // 浏览模式下的「空闲状态」就是当前目录说明，别让进度的文案盖上去
+        if isBrowsing {
+            updateBrowseChrome()
+            return
+        }
         let stats = engine.stats
         statusLabel.stringValue = stats.isReady
             ? "\(formatCount(stats.totalCount)) indexed"
@@ -1506,18 +1572,359 @@ final class SearchWindow: NSWindowController {
         }
         return path
     }
+
+    // MARK: - 文件夹浏览（Finder 式就地展开）
+
+    /// 是否正在浏览某个目录。
+    private var isBrowsing: Bool { browsingFolder != nil }
+
+    /// 表格当前的行数：搜索结果条数，或浏览模式下过滤后的条目数。
+    private var rowCount: Int { isBrowsing ? browseEntries.count : results.count }
+
+    /// 选中区里排在前面的一行（多选时以最靠前的一行为准）；没有选中时是 -1。
+    private var firstSelectedRow: Int {
+        tableView.selectedRowIndexes.first ?? tableView.selectedRow
+    }
+
+    /// 表格第 `row` 行对应的条目。
+    ///
+    /// 浏览模式把目录条目现场包装成 `FfiSearchResult`，于是打开、拷贝路径、详情面板、
+    /// 单元格渲染这些下游逻辑不必为两种数据源各写一份。
+    private func resultAt(row: Int) -> FfiSearchResult? {
+        guard row >= 0, row < rowCount else { return nil }
+        return isBrowsing ? Self.result(for: browseEntries[row], query: lastQuery) : results[row]
+    }
+
+    /// 把目录条目包装成搜索结果结构；`matchPositions` 同样按 UTF-8 字节偏移给出，
+    /// 好让名字列复用搜索结果那套高亮渲染。
+    private static func result(for entry: BrowseEntry, query: String) -> FfiSearchResult {
+        FfiSearchResult(
+            name: entry.name,
+            path: entry.path,
+            isDir: entry.isDirectory,
+            size: entry.size,
+            modified: entry.modified,
+            created: entry.created,
+            extension: (entry.name as NSString).pathExtension,
+            score: 0,
+            matchPositions: matchPositions(in: entry.name, query: query),
+            searchMode: .substring
+        )
+    }
+
+    /// 关键字在名字里出现的区间（UTF-8 字节偏移，与 Rust 侧口径一致）。
+    private static func matchPositions(in name: String, query: String) -> [FfiMatchRange] {
+        let needle = query.trimmingCharacters(in: .whitespaces)
+        guard !needle.isEmpty else { return [] }
+
+        var positions: [FfiMatchRange] = []
+        var cursor = name.startIndex
+        while let found = name.range(of: needle,
+                                     options: [.caseInsensitive, .diacriticInsensitive],
+                                     range: cursor..<name.endIndex),
+              let lower = found.lowerBound.samePosition(in: name.utf8),
+              let upper = found.upperBound.samePosition(in: name.utf8) {
+            positions.append(FfiMatchRange(
+                start: UInt32(name.utf8.distance(from: name.utf8.startIndex, to: lower)),
+                end: UInt32(name.utf8.distance(from: name.utf8.startIndex, to: upper))
+            ))
+            cursor = found.upperBound
+        }
+        return positions
+    }
+
+    /// 空格键：选中文件夹就展开浏览，选中文件就弹 Quick Look，已经在预览就关掉。
+    /// 返回 `false` 表示这个空格不该由 Lokii 处理（搜索框里打字、焦点在别处、没有选中项）。
+    private func handleSpace() -> Bool {
+        guard let window else { return false }
+        let focus = SpaceRules.focusTarget(
+            firstResponder: window.firstResponder,
+            searchFieldEditor: searchField.currentEditor(),
+            isResultsResponder: isResultsFocused(window)
+        )
+        let row = firstSelectedRow
+        let selected = resultAt(row: row)
+        let selection = SpaceRules.selectionKind(
+            selectedRow: row,
+            isSelectedContainer: selected.map { FolderBrowse.isContainer(at: $0.path) }
+        )
+
+        switch SpaceRules.intent(focus: focus, selection: selection, isPreviewing: isPreviewing) {
+        case .passThrough:
+            return false
+        case .closePreview:
+            dismissPreview()
+            return true
+        case .preview:
+            presentPreview(urls: selectedURLs())
+            return true
+        case .enterFolder:
+            if let path = selected?.path { browse(folder: path) }
+            return true
+        }
+    }
+
+    /// ⌘↓：进入选中的文件夹。选中项不是文件夹时不拦截，⌘↓ 交回表格自己的行为。
+    private func enterSelectedFolder() -> Bool {
+        guard let window, isResultsFocused(window),
+              let result = resultAt(row: firstSelectedRow),
+              FolderBrowse.isContainer(at: result.path) else { return false }
+        browse(folder: result.path)
+        return true
+    }
+
+    /// ⌘↑：回到上一级目录；已经在浏览的最顶层时退出浏览模式、恢复原来的搜索结果。
+    /// 搜索模式里按下则跳进选中项所在的目录，之后一路 ⌘↑ 同样能退回搜索结果。
+    private func leaveFolder() -> Bool {
+        guard let window, isResultsFocused(window) else { return false }
+
+        if let folder = browsingFolder {
+            if let parent = FolderBrowse.parent(of: folder) {
+                // 进上级目录后把刚离开的那个目录选上，方便按 ⌘↓ 再走回去
+                browse(folder: parent, select: folder)
+            } else {
+                exitBrowse()
+            }
+            return true
+        }
+
+        guard let result = resultAt(row: firstSelectedRow),
+              let parent = FolderBrowse.parent(of: result.path) else { return false }
+        browse(folder: parent, select: result.path)
+        return true
+    }
+
+    /// 切换到 `folder` 目录浏览；`select` 指定进入后要选中的条目路径。
+    /// 目录读不出来（权限、已被删除…）时保持原状，只在状态栏提示一声。
+    private func browse(folder: String, select: String? = nil) {
+        let includeHidden = engine.getConfig()?.index.includeHidden ?? false
+        guard let listing = FolderBrowse.listing(in: folder,
+                                                 includeHidden: includeHidden,
+                                                 maxEntries: FolderBrowse.defaultMaxEntries) else {
+            NSSound.beep()
+            flashStatus(L("search.browseUnreadable"))
+            return
+        }
+
+        dismissPreview()
+        if !isBrowsing {
+            // 第一次进入浏览模式：把搜索结果整份留底，一路 ⌘↑ 退到最顶层后原样放回
+            savedSearch = SavedSearch(results: results,
+                                      query: lastQuery,
+                                      count: countLabel.stringValue,
+                                      status: statusLabel.stringValue)
+            results = []
+            iconCache.removeAll()
+        }
+
+        // 每进入一个文件夹都清空搜索框，完整列出该目录内容（否则会带着上一步的词继续过滤）。
+        // 先改 lastQuery 再写回搜索框，让 searchChanged 的去重直接拦下、不再清一遍列表。
+        lastQuery = ""
+        searchField.stringValue = ""
+
+        browsingFolder = folder
+        browseAllEntries = Self.sorted(listing.entries, matching: tableView.sortDescriptors)
+        browseTruncated = listing.truncated
+        // 目录内容先按名称升序列出，清掉表头的排序指示免得和内容对不上
+        tableView.sortDescriptors = []
+        applyBrowseFilter(select: select)
+    }
+
+    /// 退出浏览模式，恢复进入前的搜索结果。
+    private func exitBrowse() {
+        guard isBrowsing else { return }
+        dismissPreview()
+
+        browsingFolder = nil
+        browseAllEntries = []
+        browseEntries = []
+        browseTruncated = false
+        results = savedSearch?.results ?? []
+
+        // 先改 lastQuery 再写回搜索框：万一控件回调了 searchChanged，也会被去重挡下来
+        lastQuery = savedSearch?.query ?? ""
+        searchField.stringValue = lastQuery
+        countLabel.stringValue = savedSearch?.count ?? ""
+        statusLabel.stringValue = savedSearch?.status ?? ""
+        savedSearch = nil
+
+        iconCache.removeAll()
+        tableView.sortDescriptors = []
+        refreshSearchPlaceholder()
+        reloadResultsWithFade()
+        refreshPathBar()
+    }
+
+    /// 重新套用搜索框里的过滤词并刷新表格；`select` 是过滤后要选中的条目路径。
+    private func applyBrowseFilter(select: String? = nil) {
+        browseEntries = FolderBrowse.filter(browseAllEntries, query: lastQuery)
+
+        let row: Int?
+        if let select {
+            row = browseEntries.firstIndex { $0.path == select }
+        } else {
+            let selected = tableView.selectedRow
+            row = (selected >= 0 && selected < browseEntries.count) ? selected : nil
+        }
+
+        reloadResultsWithFade()
+        if let row {
+            tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            tableView.scrollRowToVisible(row)
+        } else {
+            // 过滤后行数变少时把越界的选中行收回；没有内容就清空选中
+            tableView.deselectAll(nil)
+            refreshPathBar()
+        }
+        updateBrowseChrome()
+    }
+
+    /// 浏览模式下的计数与状态栏文案。
+    private func updateBrowseChrome() {
+        let shown = formatCount(UInt64(browseEntries.count))
+        let total = formatCount(UInt64(browseAllEntries.count))
+        countLabel.stringValue = browseEntries.count == browseAllEntries.count
+            ? String(format: L("search.browseCount"), shown)
+            : String(format: L("search.browseCountFiltered"), shown, total)
+        if browseTruncated {
+            countLabel.stringValue += " · " + String(format: L("search.browseTruncated"),
+                                                      formatCount(UInt64(FolderBrowse.defaultMaxEntries)))
+        }
+
+        if let folder = browsingFolder {
+            statusLabel.stringValue = String(format: L("search.browseStatus"), abbreviatePath(folder))
+        }
+        refreshSearchPlaceholder()
+    }
+
+    /// 搜索框当前的占位文案：浏览模式提示「在当前文件夹内过滤」，索引中提示可能不完整。
+    private var activePlaceholder: String {
+        if isBrowsing { return L("search.browsePlaceholder") }
+        return inlineProgressIndicator == nil ? originalSearchPlaceholder : L("search.indexingIncomplete")
+    }
+
+    private func refreshSearchPlaceholder() {
+        searchField.placeholderString = activePlaceholder
+    }
+
+    /// 带淡入淡出的列表刷新（与搜索结果刷新保持同一观感）。
+    private func reloadResultsWithFade() {
+        let transition = CATransition()
+        transition.type = .fade
+        transition.duration = 0.15
+        transition.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        tableView.layer?.add(transition, forKey: "fade")
+        tableView.reloadData()
+    }
+
+    /// 底部路径条跟随选中行；浏览模式下没有选中行时指回当前目录。
+    private func refreshPathBar() {
+        if let result = resultAt(row: tableView.selectedRow) {
+            pathBar.url = URL(fileURLWithPath: result.path)
+        } else if let folder = browsingFolder {
+            pathBar.url = URL(fileURLWithPath: folder)
+        } else {
+            pathBar.url = nil
+        }
+    }
+
+    /// 按表格当前的排序描述符排列目录条目；没有描述符时用 Finder 式的名称升序。
+    private static func sorted(_ entries: [BrowseEntry],
+                               matching descriptors: [NSSortDescriptor]) -> [BrowseEntry] {
+        guard let descriptor = descriptors.first,
+              let key = descriptor.key,
+              let sortKey = BrowseSortKey(rawValue: key) else {
+            return FolderBrowse.sorted(entries, by: .name, ascending: true)
+        }
+        return FolderBrowse.sorted(entries, by: sortKey, ascending: descriptor.ascending)
+    }
+
+    // MARK: - Quick Look（空格预览）
+
+    /// Quick Look 面板是否正开着。`sharedPreviewPanelExists` 保证这里不会顺手把面板建出来。
+    private var isPreviewing: Bool {
+        QLPreviewPanel.sharedPreviewPanelExists() && (QLPreviewPanel.shared()?.isVisible ?? false)
+    }
+
+    /// 预览面板当前该显示的内容：跟着表格选择走，选择被清空后沿用弹出时记录的那批。
+    private var previewItemURLs: [URL] {
+        let selected = selectedURLs()
+        return selected.isEmpty ? previewItemsFallback : selected
+    }
+
+    /// 弹出 Quick Look 面板（手动驱动模式：自己当 dataSource/delegate，不接响应链）。
+    private func presentPreview(urls: [URL]) {
+        guard !urls.isEmpty, let panel = QLPreviewPanel.shared() else {
+            NSSound.beep()
+            return
+        }
+        previewItemsFallback = urls
+        panel.dataSource = self
+        panel.delegate = self
+        panel.reloadData()
+        panel.currentPreviewItemIndex = 0
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    /// 收起 Quick Look 面板（正在预览时把键盘焦点交还给主窗口）。
+    private func dismissPreview() {
+        guard QLPreviewPanel.sharedPreviewPanelExists(), let panel = QLPreviewPanel.shared() else { return }
+        previewItemsFallback.removeAll()
+        if panel.isVisible { panel.orderOut(nil) }
+    }
+}
+
+// MARK: - Quick Look 面板
+
+extension SearchWindow: QLPreviewPanelDataSource, QLPreviewPanelDelegate {
+    func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int {
+        previewItemURLs.count
+    }
+
+    func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> QLPreviewItem! {
+        let urls = previewItemURLs
+        guard index >= 0, index < urls.count else { return nil }
+        return urls[index] as NSURL
+    }
+
+    /// 面板拿到键盘焦点后，Lokii 自己的那几个快捷键仍要生效。
+    ///
+    /// 面板只把它没处理的按键交过来，这里就接 Space / ⌘↓ / ⌘↑ 三个，剩下的一律返回
+    /// `false`，把滚动、翻页、Esc 关面板这些默认行为留给面板自己。
+    func previewPanel(_ panel: QLPreviewPanel!, handle event: NSEvent!) -> Bool {
+        guard event.type == .keyDown, let window,
+              let shortcut = LokiiWindow.shortcut(for: event) else { return false }
+        switch shortcut {
+        case .preview, .commandDown, .commandUp:
+            window.sendEvent(event)
+            return true
+        default:
+            return false
+        }
+    }
 }
 
 // MARK: - NSTableViewDataSource
 
 extension SearchWindow: NSTableViewDataSource {
     func numberOfRows(in tableView: NSTableView) -> Int {
-        results.count
+        rowCount
     }
 
     func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
         guard let descriptor = tableView.sortDescriptors.first,
               let key = descriptor.key else { return }
+
+        // 浏览模式：按同一套排序键重排目录条目（文件夹依旧排在文件前面），再套回过滤词
+        if isBrowsing {
+            guard let sortKey = BrowseSortKey(rawValue: key) else { return }
+            browseAllEntries = FolderBrowse.sorted(browseAllEntries, by: sortKey,
+                                                   ascending: descriptor.ascending)
+            tableView.deselectAll(nil)
+            refreshPathBar()
+            applyBrowseFilter()
+            return
+        }
 
         results.sort { a, b in
             let cmp: ComparisonResult
@@ -1544,15 +1951,8 @@ extension SearchWindow: NSTableViewDataSource {
 
         // Clear selection (simpler than preserving; matches Finder behavior)
         tableView.deselectAll(nil)
-        pathBar.url = nil
-        
-        let transition = CATransition()
-        transition.type = .fade
-        transition.duration = 0.15
-        transition.timingFunction = CAMediaTimingFunction(name: .easeOut)
-        tableView.layer?.add(transition, forKey: "fade")
-        
-        tableView.reloadData()
+        refreshPathBar()
+        reloadResultsWithFade()
     }
 }
 
@@ -1560,8 +1960,8 @@ extension SearchWindow: NSTableViewDataSource {
 
 extension SearchWindow: NSTableViewDelegate {
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard row < results.count, let column = tableColumn else { return nil }
-        let result = results[row]
+        guard let column = tableColumn,
+              let result = resultAt(row: row) else { return nil }
         let colID = column.identifier
 
         switch colID {
@@ -1586,14 +1986,14 @@ extension SearchWindow: NSTableViewDelegate {
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
-        let row = tableView.selectedRow
-        if row >= 0, row < results.count {
-            pathBar.url = URL(fileURLWithPath: results[row].path)
-        } else {
-            pathBar.url = nil
-        }
+        refreshPathBar()
         if infoPanelVisible {
             updateInfoPanel()
+        }
+        // 预览面板开着时让预览跟着选择走（Finder 里点另一个文件，预览就换过去）
+        if isPreviewing, let panel = QLPreviewPanel.shared(), !tableView.selectedRowIndexes.isEmpty {
+            panel.currentPreviewItemIndex = 0
+            panel.reloadData()
         }
     }
 
