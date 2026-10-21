@@ -9,23 +9,61 @@ struct LokiiConfig: Codable {
 
     struct GeneralConfig: Codable {
         var language: String
+        var showInDock: Bool
 
         enum CodingKeys: String, CodingKey {
             case language
+            case showInDock = "show_in_dock"
+        }
+
+        init(language: String = "zh-Hans", showInDock: Bool = true) {
+            self.language = language
+            self.showInDock = showInDock
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.language = try container.decodeIfPresent(String.self, forKey: .language) ?? "zh-Hans"
+            self.showInDock = try container.decodeIfPresent(Bool.self, forKey: .showInDock) ?? true
         }
     }
 
     struct IndexConfig: Codable {
         var indexPaths: [String]
         var exclude: [String]
+        var excludePaths: [String]
         var includeHidden: Bool
         var maxResults: Int
 
         enum CodingKeys: String, CodingKey {
             case indexPaths = "index_paths"
             case exclude
+            case excludePaths = "exclude_paths"
             case includeHidden = "include_hidden"
             case maxResults = "max_results"
+        }
+
+        init(
+            indexPaths: [String] = [],
+            exclude: [String] = [],
+            excludePaths: [String] = [],
+            includeHidden: Bool = false,
+            maxResults: Int = 1000
+        ) {
+            self.indexPaths = indexPaths
+            self.exclude = exclude
+            self.excludePaths = excludePaths
+            self.includeHidden = includeHidden
+            self.maxResults = maxResults
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.indexPaths = try container.decodeIfPresent([String].self, forKey: .indexPaths) ?? []
+            self.exclude = try container.decodeIfPresent([String].self, forKey: .exclude) ?? []
+            self.excludePaths = try container.decodeIfPresent([String].self, forKey: .excludePaths) ?? []
+            self.includeHidden = try container.decodeIfPresent(Bool.self, forKey: .includeHidden) ?? false
+            self.maxResults = try container.decodeIfPresent(Int.self, forKey: .maxResults) ?? 1000
         }
     }
 
@@ -53,6 +91,7 @@ final class SearchEngine: @unchecked Sendable {
     static let indexUpdatedNotification = Notification.Name("LokiiIndexUpdated")
     /// Posted on main thread after initialize() determines startup mode. userInfo: ["isColdStart": Bool]
     static let startupModeNotification = Notification.Name("LokiiStartupMode")
+    static let initializationFailedNotification = Notification.Name("LokiiInitializationFailed")
     /// Posted on main thread when config.toml is reloaded.
     static let configReloadedNotification = Notification.Name("LokiiConfigReloaded")
 
@@ -94,6 +133,15 @@ final class SearchEngine: @unchecked Sendable {
                 print("[Lokii] Hot start: \(cachedCount) cached entries")
             case let .coldStart(scannedCount):
                 print("[Lokii] Cold start: scanned \(scannedCount) entries")
+            case let .failed(message):
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(
+                        name: SearchEngine.initializationFailedNotification,
+                        object: nil,
+                        userInfo: ["message": message]
+                    )
+                }
+                return
             }
             core.startWatcher(eventHandler: handler)
             core.startConfigWatcher(eventHandler: handler)

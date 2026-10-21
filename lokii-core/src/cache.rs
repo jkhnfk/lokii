@@ -5,7 +5,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const CACHE_MAGIC: &[u8; 4] = b"LOKI";
+/// Version of the legacy `Vec<FileEntry>` payload.
 const CACHE_VERSION: u32 = 3;
+/// Version of the compact index payload (shared string tables plus records).
+const CACHE_VERSION_COMPACT: u32 = 4;
 
 /// Errors that can occur during cache operations.
 #[derive(Debug)]
@@ -17,9 +20,13 @@ pub enum CacheError {
     /// Cache file does not start with the expected magic bytes.
     BadMagic,
     /// Cache file version does not match the expected version.
-    VersionMismatch { found: u32, expected: u32 },
+    VersionMismatch {
+        found: u32,
+        expected: u32,
+    },
     /// Failed to decode the cache payload.
     Decode(bitcode::Error),
+    InvalidIndex(crate::compact_index::IndexError),
 }
 
 impl std::fmt::Display for CacheError {
@@ -29,9 +36,13 @@ impl std::fmt::Display for CacheError {
             CacheError::TooSmall => write!(f, "cache file too small for valid header"),
             CacheError::BadMagic => write!(f, "cache file has invalid magic bytes"),
             CacheError::VersionMismatch { found, expected } => {
-                write!(f, "cache version mismatch: found {found}, expected {expected}")
+                write!(
+                    f,
+                    "cache version mismatch: found {found}, expected {expected}"
+                )
             }
             CacheError::Decode(e) => write!(f, "cache decode error: {e}"),
+            CacheError::InvalidIndex(error) => write!(f, "invalid cached index: {error}"),
         }
     }
 }
@@ -63,29 +74,10 @@ pub fn cache_path() -> PathBuf {
 
 /// Save file entries to a cache file with a version header.
 ///
-/// File format: [4 bytes "LOKI"] [4 bytes version u32 LE] [N bytes bitcode payload]
-///
 /// Uses atomic write: writes to a .tmp file first, then renames to final path
 /// to prevent corruption if the process crashes mid-write.
 pub fn save_cache(entries: &[FileEntry], path: &Path) -> Result<(), CacheError> {
-    // Create parent directories if needed
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let encoded = bitcode::encode(entries);
-
-    let tmp_path = path.with_extension("tmp");
-    let mut file = fs::File::create(&tmp_path)?;
-    file.write_all(CACHE_MAGIC)?;
-    file.write_all(&CACHE_VERSION.to_le_bytes())?;
-    file.write_all(&encoded)?;
-    file.flush()?;
-
-    // Atomic rename
-    fs::rename(&tmp_path, path)?;
-
-    Ok(())
+    write_cache(CACHE_VERSION, &bitcode::encode(entries), path)
 }
 
 /// Load file entries from a cache file, validating the version header.
@@ -93,25 +85,72 @@ pub fn save_cache(entries: &[FileEntry], path: &Path) -> Result<(), CacheError> 
 /// Returns errors for: missing file, too small, bad magic, version mismatch, corrupt payload.
 /// Never panics on invalid input.
 pub fn load_cache(path: &Path) -> Result<Vec<FileEntry>, CacheError> {
-    let data = fs::read(path)?;
-
-    if data.len() < 8 {
-        return Err(CacheError::TooSmall);
-    }
-
-    if &data[0..4] != CACHE_MAGIC {
-        return Err(CacheError::BadMagic);
-    }
-
-    let version = u32::from_le_bytes(data[4..8].try_into().unwrap());
+    let (version, data) = read_cache(path)?;
     if version != CACHE_VERSION {
         return Err(CacheError::VersionMismatch {
             found: version,
             expected: CACHE_VERSION,
         });
     }
-
     bitcode::decode(&data[8..]).map_err(CacheError::Decode)
+}
+
+pub fn save_compact(
+    index: &crate::compact_index::CompactIndex,
+    path: &Path,
+) -> Result<(), CacheError> {
+    write_cache(
+        CACHE_VERSION_COMPACT,
+        &bitcode::encode(&index.to_cache()),
+        path,
+    )
+}
+
+pub fn load_compact(path: &Path) -> Result<crate::compact_index::CompactIndex, CacheError> {
+    let (version, data) = read_cache(path)?;
+    match version {
+        CACHE_VERSION => {
+            let entries: Vec<crate::compact_index::BorrowedFileEntry<'_>> =
+                bitcode::decode(&data[8..]).map_err(CacheError::Decode)?;
+            crate::compact_index::CompactIndex::from_borrowed_entries(entries)
+                .map_err(CacheError::InvalidIndex)
+        }
+        CACHE_VERSION_COMPACT => {
+            let cache = bitcode::decode(&data[8..]).map_err(CacheError::Decode)?;
+            crate::compact_index::CompactIndex::from_cache(cache).map_err(CacheError::InvalidIndex)
+        }
+        found => Err(CacheError::VersionMismatch {
+            found,
+            expected: CACHE_VERSION_COMPACT,
+        }),
+    }
+}
+
+/// Write `[4 bytes "LOKI"] [4 bytes version u32 LE] [payload]` atomically.
+fn write_cache(version: u32, payload: &[u8], path: &Path) -> Result<(), CacheError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension("tmp");
+    let mut file = fs::File::create(&temporary)?;
+    file.write_all(CACHE_MAGIC)?;
+    file.write_all(&version.to_le_bytes())?;
+    file.write_all(payload)?;
+    file.flush()?;
+    fs::rename(temporary, path)?;
+    Ok(())
+}
+
+/// Read a cache file, returning its version and raw contents (header included).
+fn read_cache(path: &Path) -> Result<(u32, Vec<u8>), CacheError> {
+    let data = fs::read(path)?;
+    if data.len() < 8 {
+        return Err(CacheError::TooSmall);
+    }
+    if &data[..4] != CACHE_MAGIC {
+        return Err(CacheError::BadMagic);
+    }
+    Ok((u32::from_le_bytes(data[4..8].try_into().unwrap()), data))
 }
 
 #[cfg(test)]
@@ -145,6 +184,23 @@ mod tests {
 
         save_cache(&entries, &path).unwrap();
         assert!(path.exists());
+    }
+
+    #[test]
+    fn interrupted_update_keeps_previous_cache_readable() {
+        let directory = TempDir::new().unwrap();
+        let path = temp_cache_path(&directory);
+        let previous = make_entries(3);
+        save_cache(&previous, &path).unwrap();
+        fs::write(path.with_extension("tmp"), b"LOKI\x04\x00").unwrap();
+
+        let recovered = load_cache(&path).unwrap();
+        assert_eq!(recovered.len(), previous.len());
+        assert_eq!(recovered[0].path, previous[0].path);
+
+        save_cache(&make_entries(5), &path).unwrap();
+        assert_eq!(load_cache(&path).unwrap().len(), 5);
+        assert!(!path.with_extension("tmp").exists());
     }
 
     #[test]

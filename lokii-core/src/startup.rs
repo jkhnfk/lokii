@@ -12,9 +12,14 @@ use std::sync::Arc;
 pub enum StartupMode {
     /// Loaded from cache, user can search immediately.
     /// Background verification will follow.
-    HotStart { cached_count: usize },
+    HotStart {
+        cached_count: usize,
+    },
     /// No cache available, performed full scan.
-    ColdStart { scanned_count: usize },
+    ColdStart {
+        scanned_count: usize,
+    },
+    Failed(crate::compact_index::IndexError),
 }
 
 /// Initialize the index: try cache first, fall back to full scan.
@@ -33,32 +38,39 @@ pub fn initialize_index(
     let paths = config.resolve_paths();
 
     // Try hot start from cache
-    match cache::load_cache(cache_file) {
+    match cache::load_compact(cache_file) {
         Ok(entries) => {
             let count = entries.len();
-            store.replace(entries);
+            store.replace_compact(entries);
 
             // Report cached count as initial progress
             progress.store(count, std::sync::atomic::Ordering::Relaxed);
 
-            StartupMode::HotStart { cached_count: count }
+            StartupMode::HotStart {
+                cached_count: count,
+            }
         }
         Err(_) => {
             // Cold start: full scan (silently fall back on any cache error)
             let filter = Arc::new(crate::filter::CompiledFilter::from_config(config));
-            let fresh = scanner::scan_directories(
+            let fresh = match scanner::scan_compact(
                 &paths,
                 filter,
                 config.index.include_hidden,
                 progress,
-            );
+            ) {
+                Ok(fresh) => fresh,
+                Err(error) => return StartupMode::Failed(error),
+            };
             let count = fresh.len();
 
             // Save cache for next startup
-            let _ = cache::save_cache(&fresh, cache_file);
+            let _ = cache::save_compact(&fresh, cache_file);
 
-            store.replace(fresh);
-            StartupMode::ColdStart { scanned_count: count }
+            store.replace_compact(fresh);
+            StartupMode::ColdStart {
+                scanned_count: count,
+            }
         }
     }
 }
@@ -71,28 +83,24 @@ pub fn verify_index(
     config: &AppConfig,
     cache_file: &Path,
     cancel: &AtomicBool,
-) {
+) -> Result<(), crate::compact_index::IndexError> {
     let paths = config.resolve_paths();
     let progress = Arc::new(AtomicUsize::new(0));
 
     let filter = Arc::new(crate::filter::CompiledFilter::from_config(config));
-    let fresh = scanner::scan_directories(
-        &paths,
-        filter,
-        config.index.include_hidden,
-        progress,
-    );
+    let fresh = scanner::scan_compact(&paths, filter, config.index.include_hidden, progress)?;
 
     // If cancelled (e.g. rebuild started), don't overwrite the store
     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-        return;
+        return Ok(());
     }
 
-    store.replace(fresh);
+    // Re-save cache with verified data. Serialize before taking the store lock
+    // so the watcher is not blocked for the duration of the encode.
+    let _ = cache::save_compact(&fresh, cache_file);
 
-    // Re-save cache with verified data
-    let entries = store.entries();
-    let _ = cache::save_cache(&entries, cache_file);
+    store.replace_compact(fresh);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -150,8 +158,14 @@ mod tests {
             other => panic!("Expected ColdStart, got: {other:?}"),
         }
 
-        assert!(store.len() > 0, "Store should have entries after cold start");
-        assert!(cache_file.exists(), "Cache file should be saved after cold start");
+        assert!(
+            store.len() > 0,
+            "Store should have entries after cold start"
+        );
+        assert!(
+            cache_file.exists(),
+            "Cache file should be saved after cold start"
+        );
     }
 
     #[test]
@@ -225,6 +239,9 @@ mod tests {
 
         // Verification is now blocking, so store is already updated
         // with fresh scan results (which differ from cached data)
-        assert!(store.len() > 0, "Store should have entries after blocking verify");
+        assert!(
+            store.len() > 0,
+            "Store should have entries after blocking verify"
+        );
     }
 }

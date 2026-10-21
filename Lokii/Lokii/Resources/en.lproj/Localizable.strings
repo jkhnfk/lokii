@@ -32,6 +32,8 @@
 /* PreferencesWindowController - General */
 "prefs.section.behavior" = "Behavior";
 "prefs.section.behavior.description" = "Choose how the main window should behave during everyday use.";
+"prefs.showInDock" = "Show in Dock";
+"prefs.showInDock.description" = "Keep the app icon in the Dock for quick access by clicking (takes effect after restart).";
 "prefs.hideOnBlur" = "Hide on focus lost";
 "prefs.hideOnBlur.description" = "Automatically hide the window when you switch to another app.";
 "prefs.rememberPosition" = "Remember window position";
@@ -50,8 +52,6 @@
 "prefs.section.language" = "Language";
 "prefs.section.language.description" = "Pick the language used across the app.";
 "prefs.language" = "Language";
-"prefs.language.description" = "This affects menus, preferences, and the main window copy.";
-"prefs.language.restartHint" = "Restart Lokii to apply language change";
 "prefs.language.zh-Hans" = "中文";
 "prefs.language.en" = "English";
 
@@ -116,17 +116,34 @@
 /* SearchWindow - search field */
 "search.placeholder" = "Search files...";
 
-/* SearchWindow - toolbar */
-"search.toggleInfo" = "Show or hide the details pane";
+/* SearchWindow - toolbar & view options */
+"search.toggleSidebar" = "Toggle Sidebar";
 "search.rebuildIndex" = "Rebuild Index";
+"window.viewOptions" = "View Options";
+"window.resetSize" = "Reset Window Size";
+"menu.zoomIn" = "Zoom In";
+"menu.zoomOut" = "Zoom Out";
+"menu.actualSize" = "Actual Size";
+"density.compact" = "Compact (11 pt)";
+"density.standard" = "Standard (13 pt)";
+"density.comfortable" = "Comfortable (15 pt)";
+"density.large" = "Large (17 pt)";
 
 /* SearchWindow - status */
 "search.indexing" = "Indexing...";
+"search.loadingIndex" = "Loading index...";
 "search.indexingIncomplete" = "Indexing in progress, results may be incomplete";
 "search.backgroundRefresh" = "Background refresh in progress";
 "search.searching" = "Searching...";
 "search.buildingIndex" = "Building Index...";
 "search.scanningFiles" = "Scanning files...";
+"search.scannedFilesLabel" = "Scanned files";
+"search.indexingCount" = "Indexing %@ files...";
+"search.indexedCount" = "%@ files indexed";
+"search.matchedCount" = "%@ matches";
+"search.matchedCount.one" = "1 match";
+"search.statusWithMatches" = "%1$@ | %2$@";
+"search.indexReady" = "Index ready";
 
 /* SearchWindow - folder browsing (Space / ⌘↓ / ⌘↑) */
 "search.browseCount" = "%@ items";
@@ -138,7 +155,10 @@
 
 /* SearchWindow - context menu */
 "search.ctx.open" = "Open";
+"search.ctx.quickLook" = "Quick Look";
 "search.ctx.revealInFinder" = "Reveal in Finder";
+"search.ctx.getInfo" = "Get Info";
+"search.ctx.copyFile" = "Copy File";
 "search.ctx.copyPath" = "Copy Path";
 "search.ctx.copyName" = "Copy Name";
 "search.ctx.launchBar" = "Send to LaunchBar";
@@ -158,19 +178,24 @@
 
 /* SearchWindow - copy */
 "search.copiedPaths" = "Copied %ld path(s)";
+/* SearchWindow - trash */
+"search.ctx.moveToTrash" = "Move to Trash";
+"search.trash.confirmTitle" = "Move %d items to Trash?";
+"search.trash.confirmMessage" = "Items moved to Trash can be restored from Finder.";
+"search.trash.confirmButton" = "Move to Trash";
+"search.trash.cancelButton" = "Cancel";
+"search.trash.failedTitle" = "Cannot Move to Trash";
+"search.trash.failedMessage" = "Failed to move %1$d item(s) to Trash:\n%2$@";
+
+/* SearchWindow - sidebar */
+"search.sidebar.emptyHint" = "Directory distribution will appear here";
+"search.sidebar.allResults" = "All Results";
 
 /* SearchWindow - table columns */
 "search.col.name" = "Name";
 "search.col.path" = "Path";
 "search.col.dateModified" = "Date Modified";
 "search.col.size" = "Size";
-
-/* SearchWindow - info panel */
-"search.info.kind" = "Kind";
-"search.info.size" = "Size";
-"search.info.created" = "Created";
-"search.info.modified" = "Modified";
-"search.info.where" = "Where";
 
 /* SearchWindow - search mode */
 "search.mode.title" = "Search Mode";
@@ -194,14 +219,37 @@
 "fda.dontShowAgain" = "Don't show again";
 "fda.later" = "Later";
 "fda.openSystemSettings" = "Open System Settings";
+"fda.restrictedHint" = "Full Disk Access restricted · View guide ↗";
 
 /* Preferences - About & Group Titles */
 "prefs.tab.about" = "About";
 "prefs.index.group.paths" = "Index Paths";
 "prefs.index.group.excludes" = "Exclude Patterns";
+"prefs.index.group.excludePaths" = "Excluded Paths";
+"prefs.index.group.excludePaths.description" = "Skip traversal of entire directory trees matching these path prefixes.";
+"prefs.index.excludePaths.systemPresets.count" = "%d system & runtime directories excluded by default";
+"prefs.index.excludePatterns.systemPresets.count" = "%d build & runtime rules excluded by default";
+"prefs.index.excludePatterns.empty" = "No custom exclude rules";
 "prefs.index.group.options" = "Scan Options";
-"prefs.index.addPath" = "Add Index Path…";
+"prefs.index.addPath" = "Add Folder";
+"prefs.index.indexPaths.inputTitle" = "Add Index Directory";
+"prefs.index.indexPaths.inputMessage" = "Enter an absolute path or a path starting with ~ (e.g. ~/Documents or /Volumes/Data):";
+"prefs.index.indexPaths.inputPlaceholder" = "e.g. ~/Documents or /Volumes/Data";
+"prefs.index.pathConfirm.title" = "Path May Not Exist";
+"prefs.index.pathConfirm.message" = "Path \"%@\" was not found on disk (it may be misspelled or an unmounted external volume). Do you still want to add it?";
+"prefs.index.pathConfirm.addAnyway" = "Add Anyway";
+"prefs.index.pathConfirm.cancel" = "Cancel";
+"prefs.index.pathNotFound" = "Not Found";
+"prefs.index.pathNotFound.help" = "This path was not found on disk or is currently offline.";
 "prefs.index.addExclude" = "Add Exclude Pattern…";
+"prefs.index.addExcludePath" = "Add Exclusion";
+"prefs.index.excludePaths.empty" = "No custom excluded paths";
+"prefs.index.excludePaths.inputTitle" = "Add Excluded Path Prefix";
+"prefs.index.excludePaths.inputMessage" = "Enter an absolute path or a path starting with ~ (e.g. ~/Library or /opt):";
+"prefs.index.excludePaths.inputPlaceholder" = "e.g. ~/Library or /opt";
+"prefs.index.excludePaths.chooseFolder" = "Choose Folder...";
+"prefs.index.excludePaths.manualInput" = "Enter Path Manually...";
+"prefs.index.excludePatterns.add" = "Add Rule";
 "prefs.about.version" = "Version";
 "prefs.about.architecture" = "Core Architecture";
 "prefs.about.architecture.value" = "Rust (lokii-core) + FSEvents Engine";
@@ -230,7 +278,9 @@
 
 /* Shortcut Recorder */
 "record_shortcut" = "Record Shortcut";
-"press_shortcut" = "Press Shortcut";
+"press_shortcut" = "Press shortcut keys…";
+"shortcut.clear" = "Clear shortcut";
+"shortcut.modifierRequired" = "Must include a modifier key (⌘ / ⌥ / ⌃)";
 "keyboard_shortcut_used_by_menu_item" = "This keyboard shortcut cannot be used as it’s already used by the “%@” menu item.";
 "keyboard_shortcut_used_by_system" = "This keyboard shortcut cannot be used as it’s already a system-wide keyboard shortcut.";
 "keyboard_shortcuts_can_be_changed" = "Most system-wide keyboard shortcuts can be changed in “System Settings › Keyboard › Keyboard Shortcuts”.";
@@ -238,3 +288,8 @@
 "force_use_shortcut" = "Use Anyway";
 "ok" = "OK";
 "space_key" = "Space";
+"search.initializationFailed" = "Index initialization failed";
+"search.initializationFailedHelp" = "Search is unavailable because the index could not be initialized. Restart Lokii to try again.";
+"prefs.about.update.automatic" = "Automatically check for updates";
+"prefs.about.update.found" = "Update available";
+"prefs.about.update.manualDownload" = "Download manually if updating fails";

@@ -538,6 +538,7 @@ dependencies = [
  "dirs",
  "glob-match",
  "jwalk",
+ "libc",
  "notify",
  "nucleo-matcher",
  "parking_lot",

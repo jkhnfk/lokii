@@ -32,6 +32,8 @@
 /* PreferencesWindowController - General */
 "prefs.section.behavior" = "行为";
 "prefs.section.behavior.description" = "控制主窗口在日常使用中的显示方式。";
+"prefs.showInDock" = "在程序坞中显示图标";
+"prefs.showInDock.description" = "在 Dock 栏常驻图标，方便通过点击快速唤起搜索窗口（重启生效）。";
 "prefs.hideOnBlur" = "失去焦点时隐藏";
 "prefs.hideOnBlur.description" = "切换到其他应用后自动收起窗口，保持桌面更清爽。";
 "prefs.rememberPosition" = "记住窗口位置";
@@ -50,8 +52,6 @@
 "prefs.section.language" = "语言";
 "prefs.section.language.description" = "选择应用界面语言。";
 "prefs.language" = "语言";
-"prefs.language.description" = "切换后会应用到菜单、设置页和主窗口文案。";
-"prefs.language.restartHint" = "重启 Lokii 后生效";
 "prefs.language.zh-Hans" = "中文";
 "prefs.language.en" = "English";
 
@@ -116,17 +116,34 @@
 /* SearchWindow - search field */
 "search.placeholder" = "搜索文件...";
 
-/* SearchWindow - toolbar */
-"search.toggleInfo" = "显示或隐藏详情面板";
+/* SearchWindow - toolbar & view options */
+"search.toggleSidebar" = "切换侧边栏";
 "search.rebuildIndex" = "重建索引";
+"window.viewOptions" = "视图选项";
+"window.resetSize" = "恢复默认窗口大小";
+"menu.zoomIn" = "放大字号";
+"menu.zoomOut" = "缩小字号";
+"menu.actualSize" = "实际大小";
+"density.compact" = "紧凑 (11 pt)";
+"density.standard" = "标准 (13 pt)";
+"density.comfortable" = "舒适 (15 pt)";
+"density.large" = "大号 (17 pt)";
 
 /* SearchWindow - status */
 "search.indexing" = "正在索引...";
+"search.loadingIndex" = "正在加载索引...";
 "search.indexingIncomplete" = "索引构建中，结果可能不完整";
 "search.backgroundRefresh" = "正在后台刷新";
 "search.searching" = "正在搜索...";
 "search.buildingIndex" = "正在构建索引...";
 "search.scanningFiles" = "正在扫描文件...";
+"search.scannedFilesLabel" = "已扫描文件";
+"search.indexingCount" = "正在索引 %@ 个文件...";
+"search.indexedCount" = "已索引 %@ 个文件";
+"search.matchedCount" = "已匹配 %@ 项";
+"search.matchedCount.one" = "已匹配 1 项";
+"search.statusWithMatches" = "%1$@ | %2$@";
+"search.indexReady" = "索引已就绪";
 
 /* SearchWindow - folder browsing (Space / ⌘↓ / ⌘↑) */
 "search.browseCount" = "%@ 个项目";
@@ -138,7 +155,10 @@
 
 /* SearchWindow - context menu */
 "search.ctx.open" = "打开";
+"search.ctx.quickLook" = "快速查看";
 "search.ctx.revealInFinder" = "在访达中显示";
+"search.ctx.getInfo" = "显示简介";
+"search.ctx.copyFile" = "拷贝文件";
 "search.ctx.copyPath" = "拷贝路径";
 "search.ctx.copyName" = "拷贝名称";
 "search.ctx.launchBar" = "用 LaunchBar 处理";
@@ -158,19 +178,24 @@
 
 /* SearchWindow - copy */
 "search.copiedPaths" = "已拷贝 %ld 个路径";
+/* SearchWindow - trash */
+"search.ctx.moveToTrash" = "移到废纸篓";
+"search.trash.confirmTitle" = "将选中的 %d 项移到废纸篓？";
+"search.trash.confirmMessage" = "移到废纸篓的项目可以在访达中放回原处。";
+"search.trash.confirmButton" = "移到废纸篓";
+"search.trash.cancelButton" = "取消";
+"search.trash.failedTitle" = "无法移到废纸篓";
+"search.trash.failedMessage" = "未能将以下 %1$d 个项目移到废纸篓：\n%2$@";
+
+/* SearchWindow - sidebar */
+"search.sidebar.emptyHint" = "输入关键词后在此查看目录分布";
+"search.sidebar.allResults" = "全部结果";
 
 /* SearchWindow - table columns */
 "search.col.name" = "名称";
 "search.col.path" = "路径";
 "search.col.dateModified" = "修改日期";
 "search.col.size" = "大小";
-
-/* SearchWindow - info panel */
-"search.info.kind" = "种类";
-"search.info.size" = "大小";
-"search.info.created" = "创建时间";
-"search.info.modified" = "修改时间";
-"search.info.where" = "位置";
 
 /* SearchWindow - search mode */
 "search.mode.title" = "搜索模式";
@@ -194,14 +219,37 @@
 "fda.dontShowAgain" = "不再提示";
 "fda.later" = "稍后";
 "fda.openSystemSettings" = "打开系统设置";
+"fda.restrictedHint" = "完全磁盘访问受限 · 查看指引 ↗";
 
 /* Preferences - About & Group Titles */
 "prefs.tab.about" = "关于";
 "prefs.index.group.paths" = "索引路径";
 "prefs.index.group.excludes" = "排除规则";
+"prefs.index.group.excludePaths" = "排除路径";
+"prefs.index.group.excludePaths.description" = "跳过匹配前缀的整个目录树，避免遍历巨型系统或缓存文件夹。";
+"prefs.index.excludePaths.systemPresets.count" = "已默认排除 %d 个系统与运行时目录";
+"prefs.index.excludePatterns.systemPresets.count" = "已默认排除 %d 个开发与构建缓存规则";
+"prefs.index.excludePatterns.empty" = "暂无自定义排除规则";
 "prefs.index.group.options" = "扫描选项";
-"prefs.index.addPath" = "添加索引路径…";
+"prefs.index.addPath" = "添加目录";
+"prefs.index.indexPaths.inputTitle" = "添加索引目录";
+"prefs.index.indexPaths.inputMessage" = "请输入绝对路径或以 ~ 开头的用户目录路径（例如：~/Documents 或 /Volumes/Data）：";
+"prefs.index.indexPaths.inputPlaceholder" = "例如：~/Documents 或 /Volumes/Data";
+"prefs.index.pathConfirm.title" = "路径可能不存在";
+"prefs.index.pathConfirm.message" = "路径“%@”在当前磁盘上未找到（可能是拼写错误或未挂载的外置磁盘）。是否仍要添加？";
+"prefs.index.pathConfirm.addAnyway" = "仍要添加";
+"prefs.index.pathConfirm.cancel" = "取消";
+"prefs.index.pathNotFound" = "未找到";
+"prefs.index.pathNotFound.help" = "该路径在当前磁盘上未找到或处于离线状态。";
 "prefs.index.addExclude" = "添加排除规则…";
+"prefs.index.addExcludePath" = "添加排除";
+"prefs.index.excludePaths.empty" = "暂无自定义排除路径";
+"prefs.index.excludePaths.inputTitle" = "添加排除路径前缀";
+"prefs.index.excludePaths.inputMessage" = "请输入绝对路径或以 ~ 开头的用户目录路径（例如：~/Library 或 /opt）：";
+"prefs.index.excludePaths.inputPlaceholder" = "例如：~/Library 或 /opt";
+"prefs.index.excludePaths.chooseFolder" = "浏览选择文件夹...";
+"prefs.index.excludePaths.manualInput" = "手动输入路径...";
+"prefs.index.excludePatterns.add" = "添加规则";
 "prefs.about.version" = "版本";
 "prefs.about.architecture" = "核心架构";
 "prefs.about.architecture.value" = "Rust (lokii-core) + FSEvents 引擎";
@@ -230,11 +278,18 @@
 
 /* Shortcut Recorder */
 "record_shortcut" = "设置快捷键";
-"press_shortcut" = "按下快捷键";
+"press_shortcut" = "按下快捷键组合…";
+"shortcut.clear" = "清除快捷键";
+"shortcut.modifierRequired" = "请搭配修饰键（⌘ / ⌥ / ⌃）使用";
 "keyboard_shortcut_used_by_menu_item" = "当前快捷键无法使用，因为它已被用作菜单项“%@”的快捷键。";
 "keyboard_shortcut_used_by_system" = "当前快捷键无法使用，因为它已被用作系统快捷键。";
 "keyboard_shortcuts_can_be_changed" = "可以在“系统设置 › 键盘 › 键盘快捷键”中更改大多数系统快捷键。";
 "keyboard_shortcut_disallowed" = "Option键必须与Command键或Control键组合使用。";
 "force_use_shortcut" = "强制使用";
 "ok" = "好";
-"space_key" = "空格";
+"space_key" = "Space";
+"search.initializationFailed" = "索引初始化失败";
+"search.initializationFailedHelp" = "索引未能初始化，搜索暂不可用。请重新启动 Lokii 后重试。";
+"prefs.about.update.automatic" = "自动检查更新";
+"prefs.about.update.found" = "有可用更新";
+"prefs.about.update.manualDownload" = "更新失败时手动下载";

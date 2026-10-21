@@ -6,11 +6,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   macos:
     name: macOS ${{ matrix.arch }}（检查/测试 + 构建）
-    runs-on: macos-15
+    runs-on: macos-26
     strategy:
       fail-fast: false
       matrix:
@@ -20,12 +21,18 @@ jobs:
           - arch: 'x86_64'
             target: 'x86_64-apple-darwin'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      # 切换至 Xcode 16（Swift 6），兼容现代化依赖包工具链规范
-      - name: select Xcode 16
+      # 优先匹配最新的现代 Xcode 工具链（支持 Xcode 26+，最低满足 Swift 6）
+      - name: select modern Xcode
         run: |
-          XCODE_PATH=$(find /Applications -maxdepth 1 -name "Xcode_16*.app" | sort -V | tail -n 1)
+          XCODE_PATH=$(find /Applications -maxdepth 1 -name "Xcode_2*.app" | sort -V | tail -n 1)
+          if [ -z "$XCODE_PATH" ]; then
+            XCODE_PATH=$(find /Applications -maxdepth 1 -name "Xcode_16*.app" | sort -V | tail -n 1)
+          fi
+          if [ -z "$XCODE_PATH" ] && [ -d "/Applications/Xcode.app" ]; then
+            XCODE_PATH="/Applications/Xcode.app"
+          fi
           if [ -n "$XCODE_PATH" ]; then
             echo "Selecting $XCODE_PATH"
             sudo xcode-select -s "$XCODE_PATH"
@@ -55,6 +62,28 @@ jobs:
       - name: test
         run: make test ARCH=${{ matrix.arch }}
 
-      # 验证 macOS AppKit 前端 release 模式编译、静态链接与 .app 组装
+      # 验证 macOS AppKit 前端 release 模式编译、静态链接与 .app 组装（常规 PR/push 快速门禁）
       - name: build release
+        if: github.event_name != 'workflow_dispatch'
         run: make release ARCH=${{ matrix.arch }}
+
+      # 安装 create-dmg 以生成原生拖拽布局的 DMG（仅手动触发打包时执行）
+      - name: install create-dmg
+        if: github.event_name == 'workflow_dispatch'
+        run: brew install create-dmg || true
+
+      # 执行打包脚本产出固定资产名 Lokii-<arch>.dmg 与 zip 归档（仅手动触发打包时执行）
+      - name: package app and dmg
+        if: github.event_name == 'workflow_dispatch'
+        run: make package ARCH=${{ matrix.arch }}
+
+      # 上传构建产物至工作流 Artifacts，便于测试包下载验证（仅手动触发打包时执行）
+      - name: upload workflow artifact
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v5
+        with:
+          name: Lokii-${{ matrix.arch }}
+          path: |
+            output/Lokii-*.dmg
+            output/Lokii-*.zip
+          if-no-files-found: error

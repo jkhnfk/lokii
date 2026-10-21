@@ -1,7 +1,7 @@
 use regex::RegexBuilder;
 
-use crate::indexer::IndexStore;
 use super::{AdvancedSearchResult, SearchMode};
+use crate::indexer::IndexStore;
 
 /// Regex search using the `regex` crate.
 ///
@@ -13,41 +13,35 @@ pub fn search(
     query: &str,
     max_results: usize,
 ) -> (Vec<AdvancedSearchResult>, Option<String>) {
-    let pattern = query
-        .trim()
-        .strip_prefix("regex:")
-        .unwrap_or(query.trim());
-
+    let pattern = query.trim().strip_prefix("regex:").unwrap_or(query.trim());
     if pattern.is_empty() {
         return (Vec::new(), None);
     }
-
-    let re = match RegexBuilder::new(pattern)
+    let regex = match RegexBuilder::new(pattern)
         .case_insensitive(true)
         .size_limit(10_000_000)
         .build()
     {
-        Ok(re) => re,
-        Err(err) => {
-            return (Vec::new(), Some(format!("Invalid regex: {}", err)));
-        }
+        Ok(regex) => regex,
+        Err(error) => return (Vec::new(), Some(format!("Invalid regex: {error}"))),
     };
-
-    let entries = store.entries();
-    let mut results: Vec<AdvancedSearchResult> = entries
-        .iter()
-        .filter_map(|entry| {
-            re.find(&entry.name).map(|m| AdvancedSearchResult {
-                entry: entry.clone(),
+    let read = store.read();
+    let results = super::rank_names(&read, max_results, |name| regex.is_match(name).then_some(1))
+        .into_iter()
+        .map(|candidate| {
+            let view = read
+                .view(crate::compact_index::EntryId(candidate.ordinal))
+                .unwrap();
+            let matched = regex.find(view.name).unwrap();
+            AdvancedSearchResult {
+                entry: view.materialize(),
                 score: 1.0,
-                match_positions: vec![(m.start(), m.end())],
+                match_positions: vec![(matched.start(), matched.end())],
+                parent_match_positions: Vec::new(),
                 search_mode: SearchMode::Regex,
-            })
+            }
         })
         .collect();
-
-    results.sort_by(|a, b| a.entry.name.cmp(&b.entry.name));
-    results.truncate(max_results);
     (results, None)
 }
 

@@ -11,36 +11,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var preferencesController: PreferencesWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let config = engine.getConfig()
+
         // 在创建任何 UI 之前加载语言包
-        let lang = engine.getConfig()?.general.language ?? "zh-Hans"
-        L10n.configure(language: lang)
+        L10n.configure(language: config?.general.language ?? "zh-Hans")
 
         // 应用存储的外观主题
         ThemeManager.shared.applyCurrentTheme()
 
-        // LSUIElement apps must explicitly set activation policy to accept keyboard input
-        NSApp.setActivationPolicy(.accessory)
+        // 根据配置设置应用激活策略（是否常驻 Dock）
+        NSApp.setActivationPolicy((config?.general.showInDock ?? true) ? .regular : .accessory)
 
         setupStatusItem()
         setupMainMenu()
+        NotificationCenter.default.addObserver(self, selector: #selector(onLanguageChanged),
+                                               name: L10n.languageChangedNotification, object: nil)
         registerGlobalShortcut()
 
         mainWindow = SearchWindow(engine: engine)
         mainWindow?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
-        checkAndPromptFDA()
-
         engine.initialize()
 
         // 静默安装随包的命令行工具，使终端可直接调用 `lokii`
         CommandLineInstaller.installIfNeeded()
 
-        // 后台静默检查更新（延迟 3 秒，避免阻塞冷启动性能）
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-            Task { @MainActor in
-                AppUpdater.shared.checkForUpdates(isUserInitiated: false)
-            }
+        // 热启动直接就绪场景下，延迟 0.3 秒主动弹出授权提醒浮窗
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.checkAndPromptFDA()
         }
+
+        AppUpdater.shared.start()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -49,12 +50,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
-        guard engine.hasFullDiskAccess else { return }
-        UserDefaults.standard.removeObject(forKey: "FDAPromptDismissed")
-        FDAGuideWindowController.closeIfOpen()
+        clearFDAPromptIfGranted()
     }
 
     func applicationDidResignActive(_ notification: Notification) {
+        if FDAGuideWindowController.isPresenting {
+            return
+        }
         guard engine.getConfig()?.window.hideOnBlur ?? true else { return }
         mainWindow?.window?.orderOut(nil)
     }
@@ -110,18 +112,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Full Disk Access
 
-    private func checkAndPromptFDA() {
-        if engine.hasFullDiskAccess {
-            UserDefaults.standard.removeObject(forKey: "FDAPromptDismissed")
-            FDAGuideWindowController.closeIfOpen()
+    func checkAndPromptFDA() {
+        guard !clearFDAPromptIfGranted() else { return }
+        guard !FDAGuideWindowController.isPromptDismissed else { return }
+        // 若主窗口处于冷启动全屏建库遮罩状态，暂不弹出，待索引就绪遮罩收起后再弹出
+        if mainWindow?.isOverlayVisible == true {
             return
         }
-
-        guard !UserDefaults.standard.bool(forKey: "FDAPromptDismissed") else { return }
         FDAGuideWindowController.show()
     }
 
+    /// 权限已授予时清除“不再提示”标记并收起引导窗；返回当前是否已具备完整磁盘访问权限
+    @discardableResult
+    private func clearFDAPromptIfGranted() -> Bool {
+        guard engine.hasFullDiskAccess else { return false }
+        FDAGuideWindowController.clearPromptDismissed()
+        FDAGuideWindowController.closeIfOpen()
+        return true
+    }
+
     // MARK: - Main Menu
+
+    @objc private func onLanguageChanged() {
+        NSApp.mainMenu?.refreshLocalizedTitles()
+        statusItem?.menu?.refreshLocalizedTitles()
+    }
 
     private func setupMainMenu() {
         let mainMenu = NSMenu()
@@ -131,47 +146,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appMenu = NSMenu()
 
         // About Lokii — custom About panel with version, copyright, description
-        let aboutItem = NSMenuItem(title: L("menu.about"), action: #selector(showAboutPanel), keyEquivalent: "")
+        let aboutItem = NSMenuItem(localizedKey: "menu.about", action: #selector(showAboutPanel), keyEquivalent: "")
         aboutItem.target = self
         appMenu.addItem(aboutItem)
 
-        let checkUpdatesItem = NSMenuItem(title: L("menu.checkUpdates"), action: #selector(checkForUpdates), keyEquivalent: "")
+        let checkUpdatesItem = NSMenuItem(localizedKey: "menu.checkUpdates", action: #selector(checkForUpdates), keyEquivalent: "")
         checkUpdatesItem.target = self
         appMenu.addItem(checkUpdatesItem)
 
         appMenu.addItem(NSMenuItem.separator())
 
         // Preferences... with Cmd+,
-        let prefsItem = NSMenuItem(title: L("menu.preferences"), action: #selector(openPreferences), keyEquivalent: ",")
+        let prefsItem = NSMenuItem(localizedKey: "menu.preferences", action: #selector(openPreferences), keyEquivalent: ",")
         prefsItem.target = self
         appMenu.addItem(prefsItem)
 
         appMenu.addItem(NSMenuItem.separator())
 
         // Quit Lokii with Cmd+Q
-        appMenu.addItem(withTitle: L("menu.quit"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addLocalizedItem("menu.quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
 
         // Edit menu (for copy/paste in search field)
         let editMenuItem = NSMenuItem()
+        editMenuItem.representedObject = "menu.edit"
+        editMenuItem.title = L("menu.edit")
         let editMenu = NSMenu(title: L("menu.edit"))
-        editMenu.addItem(withTitle: L("menu.cut"), action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addLocalizedItem("menu.cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         // 拷贝：搜索窗口在前时复制选中条目的路径，其余情况退回 AppKit
         // 标准的文本拷贝（见 `copySelectedPath`）。这样搜索框聚焦时 ⌘C
         // 也能复制路径，而不是被 field editor 静默吃掉。
-        editMenu.addItem(withTitle: L("menu.copy"), action: #selector(copySelectedPath(_:)), keyEquivalent: "c")
-        editMenu.addItem(withTitle: L("menu.paste"), action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        editMenu.addItem(withTitle: L("menu.selectAll"), action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenu.addLocalizedItem("menu.copy", action: #selector(copySelectedPath(_:)), keyEquivalent: "c")
+        editMenu.addLocalizedItem("menu.paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addLocalizedItem("menu.selectAll", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editMenuItem.submenu = editMenu
         mainMenu.addItem(editMenuItem)
 
         // Window menu
         let windowMenuItem = NSMenuItem()
+        windowMenuItem.representedObject = "menu.window"
+        windowMenuItem.title = L("menu.window")
         let windowMenu = NSMenu(title: L("menu.window"))
-        windowMenu.addItem(withTitle: L("menu.close"), action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
-        windowMenu.addItem(withTitle: L("menu.minimize"), action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addLocalizedItem("menu.close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        windowMenu.addLocalizedItem("menu.minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         windowMenuItem.submenu = windowMenu
         mainMenu.addItem(windowMenuItem)
 
@@ -223,7 +242,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.orderFrontStandardAboutPanel(options: options)
     }
 
-    @objc private func openPreferences() {
+    @objc func openPreferences() {
         if preferencesController == nil {
             preferencesController = PreferencesWindowController(engine: engine)
         }
@@ -234,11 +253,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor
     @objc private func checkForUpdates() {
-        if preferencesController == nil {
-            preferencesController = PreferencesWindowController(engine: engine)
-        }
-        preferencesController?.showWindow(tab: "about")
-        preferencesController?.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         AppUpdater.shared.checkForUpdates(isUserInitiated: true)
     }

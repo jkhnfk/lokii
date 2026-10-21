@@ -26,9 +26,12 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
     exit 1
 fi
 
+# 全工程统一最低支持系统版本为 macOS 13.0 (Ventura)
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
+
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 version="$(grep -m1 '^version = ' "$repo_root/lokii-core/Cargo.toml" | cut -d '"' -f2)"
-build_number="$(git -C "$repo_root" rev-list --count HEAD 2>/dev/null || echo 1)"
+build_number="$version"
 
 command="${1:-help}"
 if [[ $# -gt 0 ]]; then
@@ -174,8 +177,14 @@ build_app() {
         cp "$repo_root/Lokii/Lokii/Resources/Lokii.icns" "$icns_path"
     fi
 
-    # 编译资源束 Assets.car（包含 AppIcon 多分辨率原生图集）
+    # 编译资源束 Assets.car（包含 AppIcon 多分辨率原生图集与现代化分层图标栈）
     local partial_plist="$output_dir/partial.plist"
+    local actool_inputs=()
+    if [[ -d "$repo_root/Lokii/Lokii/AppIcon.icon" ]]; then
+        actool_inputs+=("$repo_root/Lokii/Lokii/AppIcon.icon")
+    fi
+    actool_inputs+=("$xcassets")
+
     xcrun actool \
         --compile "$output_dir" \
         --platform macosx \
@@ -183,20 +192,37 @@ build_app() {
         --app-icon AppIcon \
         --output-partial-info-plist "$partial_plist" \
         --output-format human-readable-text \
-        "$xcassets" >/dev/null 2>&1 || true
+        "${actool_inputs[@]}" >/dev/null 2>&1 || true
     rm -f "$partial_plist" "$output_dir/AppIcon.icns"
+
+    # 校验生成的 Assets.car 是否包含现代分层图标栈；若缺少则采用标准化 Assets.car 兜底
+    local fallback_car="$repo_root/Lokii/Lokii/Resources/Assets.car"
+    local has_layered_icon=false
+    if [[ -f "$output_dir/Assets.car" ]] && xcrun assetutil --info "$output_dir/Assets.car" 2>/dev/null | grep -q '"AssetType" : "IconImageStack"'; then
+        has_layered_icon=true
+    fi
+    if [[ "$has_layered_icon" != "true" && -f "$fallback_car" ]]; then
+        echo "==> 编译环境未生成现代化分层图标栈，使用标准预置 Assets.car 兜底..."
+        cp "$fallback_car" "$output_dir/Assets.car"
+    fi
 
     # 组装 Bundle 目录结构
     rm -rf "$bundle_dir"
     mkdir -p "$bundle_dir/Contents/MacOS" "$bundle_dir/Contents/Resources"
 
     cp "$bin_dir/Lokii" "$bundle_dir/Contents/MacOS/Lokii"
-    cp "$icns_path"     "$bundle_dir/Contents/Resources/Lokii.icns"
+    chmod +x "$bundle_dir/Contents/MacOS/Lokii"
+
+    # 拷贝预置资源与多语言
+    if [[ -d "$repo_root/Lokii/Lokii/Resources" ]]; then
+        cp -R "$repo_root/Lokii/Lokii/Resources/"* "$bundle_dir/Contents/Resources/"
+    fi
+
+    # 确保应用图标与最新的 Assets.car 正确置入
+    cp "$icns_path" "$bundle_dir/Contents/Resources/Lokii.icns"
     if [[ -f "$output_dir/Assets.car" ]]; then
         cp "$output_dir/Assets.car" "$bundle_dir/Contents/Resources/Assets.car"
     fi
-    chmod +x "$bundle_dir/Contents/MacOS/Lokii"
-
     # 编译 lokii 命令行工具并随包分发到 Contents/Resources/bin/
     # 使安装 App 后可在终端直接调用（首次启动时由 App 静默建立 PATH 软链）
     local cargo_profile="release"
@@ -232,14 +258,17 @@ build_app() {
     cp "$cli_bin" "$bundle_dir/Contents/Resources/bin/lokii"
     chmod +x "$bundle_dir/Contents/Resources/bin/lokii"
 
-    # 拷贝多语言资源到标准 macOS Contents/Resources/
-    cp -R "$repo_root/Lokii/Lokii/Resources/"* "$bundle_dir/Contents/Resources/"
-
     # 拷贝依赖包资源束（若有）至标准 Contents/Resources/
     find "$bin_dir" -maxdepth 1 -name "*.bundle" | while read -r b; do
         [[ -e "$b" ]] || continue
         cp -R "$b" "$bundle_dir/Contents/Resources/"
     done
+
+    local update_framework
+    update_framework="$(find "$repo_root/Lokii/.build/artifacts" -path '*/macos-arm64_x86_64/Sparkle.framework' -type d -print -quit)"
+    [[ -n "$update_framework" ]] || { echo "[FAIL] 更新框架缺失" >&2; exit 1; }
+    mkdir -p "$bundle_dir/Contents/Frameworks"
+    ditto "$update_framework" "$bundle_dir/Contents/Frameworks/Sparkle.framework"
 
     # 生成 Info.plist
     cat <<EOF > "$bundle_dir/Contents/Info.plist"
@@ -274,16 +303,41 @@ build_app() {
     <key>LSUIElement</key>
     <true/>
     <key>NSAppleEventsUsageDescription</key>
-    <string>Lokii hands the selected item to Keyboard Maestro so the macro you set up can act on it. Lokii only sends this one command; it never reads anything back.</string>
+    <string>Lokii hands the selected item to Keyboard Maestro so the macro you set up can act on it, and uses AppleScript to display file information in Finder. Lokii only sends these commands; it never reads anything back.</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <key>SUPublicEDKey</key>
+    <string>$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$repo_root/Lokii/Lokii/Info.plist")</string>
+    <key>SUFeedURL</key>
+    <string>https://huangy7.github.io/lokii/updates/${arch_flag}.xml</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUUpdateCheckInterval</key>
+    <integer>86400</integer>
+    <key>SUAutomaticallyUpdate</key>
+    <false/>
+    <key>SUAllowsAutomaticUpdates</key>
+    <false/>
+    <key>SUVerifyUpdateBeforeExtraction</key>
+    <true/>
 </dict>
 </plist>
 EOF
 
     plutil -lint "$bundle_dir/Contents/Info.plist" >/dev/null
+
+    local framework_root
+    framework_root="$(cd "$bundle_dir/Contents/Frameworks/Sparkle.framework/Versions/Current" && pwd -P)"
+    local nested_identity="${signing_identity:--}"
+    local signing_options=()
+    if [[ -n "$signing_identity" ]]; then signing_options=(--options runtime --timestamp); fi
+    codesign --force ${signing_options[@]+"${signing_options[@]}"} --sign "$nested_identity" "$framework_root/Autoupdate"
+    find "$framework_root" -depth \( -name '*.xpc' -o -name '*.app' \) -type d | while IFS= read -r nested; do
+        codesign --force ${signing_options[@]+"${signing_options[@]}"} --sign "$nested_identity" "$nested"
+    done
+    codesign --force ${signing_options[@]+"${signing_options[@]}"} --sign "$nested_identity" "$bundle_dir/Contents/Frameworks/Sparkle.framework"
 
     # 签名 .app（若无身份则进行 ad-hoc 签名）
     if [[ -n "$signing_identity" ]]; then
@@ -310,6 +364,8 @@ EOF
         codesign --force --sign - "$bundle_dir"
     fi
 
+    bash "$repo_root/scripts/verify-update-bundle.sh" "$bundle_dir" "$arch_flag"
+    ditto -c -k --keepParent "$bundle_dir" "$output_dir/${app_name}-${version}-${arch_flag}.zip"
     echo "==> App Bundle 组装完成: $bundle_dir"
 }
 
@@ -324,6 +380,7 @@ package_dmg() {
         ditto -c -k --keepParent "$bundle_dir" "$tmp_zip"
         xcrun notarytool submit "$tmp_zip" --keychain-profile "$notary_profile" --wait
         xcrun stapler staple -v "$bundle_dir"
+        ditto -c -k --keepParent "$bundle_dir" "$output_dir/${app_name}-${version}-${arch_flag}.zip"
         rm -f "$tmp_zip"
     fi
 

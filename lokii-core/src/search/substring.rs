@@ -1,6 +1,6 @@
 use crate::indexer::{score_match, IndexStore, MatchScore};
 
-use super::{AdvancedSearchResult, SearchMode};
+use super::{find_positions, AdvancedSearchResult, SearchMode};
 
 /// Convert MatchScore to normalized f64 per research recommendation.
 fn score_to_f64(score: MatchScore) -> f64 {
@@ -11,73 +11,53 @@ fn score_to_f64(score: MatchScore) -> f64 {
     }
 }
 
-/// Compute match positions for substring matches.
-/// Returns byte ranges of each keyword match in the name.
-fn find_positions(name_lower: &str, keywords: &[String]) -> Vec<(usize, usize)> {
-    let mut positions = Vec::new();
-    for kw in keywords {
-        if let Some(start) = name_lower.find(kw.as_str()) {
-            positions.push((start, start + kw.len()));
-        }
-    }
-    positions
-}
-
 /// Substring search wrapping existing IndexStore logic.
 /// Preserves v1.0 behavior: extension filter, multi-keyword AND, Exact > Prefix > Substring ranking.
 pub fn search(store: &IndexStore, query: &str, max_results: usize) -> Vec<AdvancedSearchResult> {
     let query = query.trim();
-    if query.is_empty() {
+    if query.is_empty() || max_results == 0 {
         return Vec::new();
     }
-
-    // Extension filter path: query starts with '.' and contains no spaces
-    if query.starts_with('.') && !query.contains(' ') {
-        let ext = query[1..].to_lowercase();
-        let entries = store.entries();
-        let mut results: Vec<AdvancedSearchResult> = entries
-            .iter()
-            .filter(|e| e.extension == ext)
-            .map(|e| AdvancedSearchResult {
-                entry: e.clone(),
-                score: 1.0,
-                match_positions: vec![],
-                search_mode: SearchMode::Substring,
-            })
-            .collect();
-        results.sort_by(|a, b| a.entry.name.cmp(&b.entry.name));
-        results.truncate(max_results);
-        return results;
-    }
-
-    // Standard substring search
-    let keywords: Vec<String> = query.split_whitespace().map(|s| s.to_lowercase()).collect();
-
-    let entries = store.entries();
-    let mut results: Vec<AdvancedSearchResult> = entries
-        .iter()
-        .filter_map(|e| {
-            let name_lower = e.name.to_lowercase();
-            score_match(&name_lower, &keywords).map(|score| {
-                let positions = find_positions(&name_lower, &keywords);
-                AdvancedSearchResult {
-                    entry: e.clone(),
-                    score: score_to_f64(score),
-                    match_positions: positions,
-                    search_mode: SearchMode::Substring,
+    let extension =
+        (query.starts_with('.') && !query.contains(' ')).then(|| query[1..].to_lowercase());
+    let keywords: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    let read = store.read();
+    let matches = match &extension {
+        Some(extension) => {
+            let mut top = super::top_k::TopK::new(max_results);
+            for (id, view) in read.iter() {
+                if view.extension == extension {
+                    top.offer(id.0, MatchScore::Exact, view.name);
                 }
-            })
+            }
+            top.finish()
+        }
+        None => super::rank_names(&read, max_results, |name| {
+            score_match(&name.to_lowercase(), &keywords)
+        }),
+    };
+    matches
+        .into_iter()
+        .map(|candidate| {
+            let view = read
+                .view(crate::compact_index::EntryId(candidate.ordinal))
+                .unwrap();
+            AdvancedSearchResult {
+                entry: view.materialize(),
+                score: score_to_f64(candidate.score),
+                match_positions: if extension.is_some() {
+                    Vec::new()
+                } else {
+                    find_positions(
+                        &view.name.to_lowercase(),
+                        keywords.iter().map(String::as_str),
+                    )
+                },
+                parent_match_positions: Vec::new(),
+                search_mode: SearchMode::Substring,
+            }
         })
-        .collect();
-
-    results.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.entry.name.cmp(&b.entry.name))
-    });
-    results.truncate(max_results);
-    results
+        .collect()
 }
 
 #[cfg(test)]
@@ -152,14 +132,14 @@ mod tests {
     fn test_score_normalization() {
         let store = IndexStore::new();
         store.replace(vec![
-            make_entry("main.rs", "/main.rs", false),       // prefix match for "main"
-            make_entry("my_main.rs", "/my_main.rs", false),  // substring match
+            make_entry("main.rs", "/main.rs", false), // prefix match for "main"
+            make_entry("my_main.rs", "/my_main.rs", false), // substring match
         ]);
         let results = search(&store, "main", 500);
         assert_eq!(results.len(), 2);
         // Prefix should score higher than substring
         assert!(results[0].score > results[1].score);
         assert_eq!(results[0].score, 0.75); // prefix
-        assert_eq!(results[1].score, 0.5);  // substring
+        assert_eq!(results[1].score, 0.5); // substring
     }
 }

@@ -43,7 +43,8 @@ Lokii is a native macOS instant file search tool engineered for developer-grade 
 | **Quick Look Preview** | Press `Space` on a file to preview it in the system Quick Look panel, no app launch required. |
 | **Type-to-Filter** | With the result list focused, just start typing letters or digits to jump back to the search field and filter — fully compatible with IMEs like Rime for CJK input. |
 | **Native AppKit Density** | High-density virtualized table view, native macOS file icons, zebra striping, and spring-damped micro-interactions. |
-| **Persistent Binary Cache** | Bitcode-serialized index cache that survives system restarts for instant hot-start readiness. |
+| **Keyboard-First Workflow** | Global shortcut toggle (`⌘⇧Space`), arrow navigation, `Enter` to reveal in Finder, `⌘C` to copy path, and `Esc` to hide. |
+| **Persistent Binary Cache** | Versioned bitcode cache with shared string tables, automatic loading of legacy v3 caches, and v4 saves after background verification. |
 | **Native Settings & FDA** | Native Preferences window with custom search roots, exclusion rules, theme switching (Light/Dark/System), and interactive Full Disk Access setup. |
 
 ### Keyboard Shortcuts
@@ -65,6 +66,8 @@ Lokii is a native macOS instant file search tool engineered for developer-grade 
 | `⌘↩` | Hand the selection to LaunchBar |
 | `⇧↩` | Run a Keyboard Maestro macro on the selection |
 | `⌘F` | Refocus the search field |
+
+The compact index shares filenames, parent paths, and extensions to reduce duplicate storage. Search materializes only the selected results while preserving matching and ordering behavior. Initialization failures display an error instead of reporting an empty index as ready. Whole-app performance validation is still pending; core-process measurements are not whole-app guarantees.
 
 ## Privacy
 

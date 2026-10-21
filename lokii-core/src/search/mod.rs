@@ -1,10 +1,49 @@
 pub mod fuzzy;
-pub mod substring;
-pub mod wildcard;
+pub mod path_query;
+pub mod path_search;
 pub mod regex_search;
+pub mod substring;
+pub mod top_k;
+pub mod wildcard;
 
+use crate::compact_index::CompactIndex;
 use crate::indexer::{FileEntry, IndexStore};
 use serde::Serialize;
+
+use top_k::{Candidate, TopK};
+
+/// 计算各关键词在 `name_lower` 中的字节区间，供前端高亮。
+pub(crate) fn find_positions<'a>(
+    name_lower: &str,
+    keywords: impl IntoIterator<Item = &'a str>,
+) -> Vec<(usize, usize)> {
+    let mut positions = Vec::new();
+    for keyword in keywords {
+        if keyword.is_empty() {
+            continue;
+        }
+        if let Some(start) = name_lower.find(keyword) {
+            positions.push((start, start + keyword.len()));
+        }
+    }
+    positions
+}
+
+/// Rank every indexed name by `score` (higher is better, `None` excludes the
+/// entry) and return the best `max_results`, ordered by score then name.
+pub(crate) fn rank_names<'a, K: Ord>(
+    index: &'a CompactIndex,
+    max_results: usize,
+    mut score: impl FnMut(&'a str) -> Option<K>,
+) -> Vec<Candidate<'a, K>> {
+    let mut top = TopK::new(max_results);
+    for (id, name) in index.names() {
+        if let Some(score) = score(name) {
+            top.offer(id.0, score, name);
+        }
+    }
+    top.finish()
+}
 
 /// Search mode per D-01, D-02, D-04.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -24,6 +63,8 @@ pub struct AdvancedSearchResult {
     pub entry: FileEntry,
     pub score: f64,
     pub match_positions: Vec<(usize, usize)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parent_match_positions: Vec<(usize, usize)>,
     pub search_mode: SearchMode,
 }
 
@@ -57,6 +98,14 @@ pub fn dispatch(
         other => other,
     };
 
+    // 含路径语法（'/' 或 'in:'）时交由路径检索器。
+    if effective_mode != SearchMode::Regex {
+        if let Some(path_query) = path_query::PathQuery::parse(query) {
+            let results = path_search::search(store, &path_query, max_results);
+            return (results, None);
+        }
+    }
+
     // For Auto that detected as Auto (no special chars), try substring first
     let (results, error) = match effective_mode {
         SearchMode::Auto | SearchMode::Substring => {
@@ -74,9 +123,7 @@ pub fn dispatch(
             let results = wildcard::search(store, query, max_results);
             (results, None)
         }
-        SearchMode::Regex => {
-            regex_search::search(store, query, max_results)
-        }
+        SearchMode::Regex => regex_search::search(store, query, max_results),
         SearchMode::Fuzzy => {
             let results = fuzzy::search(store, query, max_results);
             (results, None)
@@ -260,10 +307,67 @@ mod tests {
             },
             score: 0.75,
             match_positions: vec![(0, 4)],
+            parent_match_positions: Vec::new(),
             search_mode: SearchMode::Substring,
         };
         let json = serde_json::to_string(&result).unwrap();
-        assert!(json.contains("matchPositions"), "should have camelCase matchPositions");
-        assert!(json.contains("searchMode"), "should have camelCase searchMode");
+        assert!(
+            json.contains("matchPositions"),
+            "should have camelCase matchPositions"
+        );
+        assert!(
+            json.contains("searchMode"),
+            "should have camelCase searchMode"
+        );
+    }
+
+    #[test]
+    fn test_dispatch_path_query_routes_to_path_search() {
+        let store = IndexStore::new();
+        store.replace(vec![
+            crate::indexer::FileEntry {
+                name: "main.rs".to_string(),
+                path: "/project/src/main.rs".to_string(),
+                is_dir: false,
+                size: 1024,
+                modified: 1700000000,
+                created_at: 0,
+                extension: "rs".to_string(),
+            },
+            crate::indexer::FileEntry {
+                name: "main.rs".to_string(),
+                path: "/other/pkg/main.rs".to_string(),
+                is_dir: false,
+                size: 1024,
+                modified: 1700000000,
+                created_at: 0,
+                extension: "rs".to_string(),
+            },
+        ]);
+
+        let (results, err) = dispatch(&store, "src/main.rs", SearchMode::Auto, 10);
+        assert!(err.is_none());
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entry.path, "/project/src/main.rs");
+        assert!(!results[0].parent_match_positions.is_empty());
+    }
+
+    #[test]
+    fn test_dispatch_regex_preserves_slash() {
+        let store = IndexStore::new();
+        store.replace(vec![crate::indexer::FileEntry {
+            name: "main.rs".to_string(),
+            path: "/src/main.rs".to_string(),
+            is_dir: false,
+            size: 1024,
+            modified: 1700000000,
+            created_at: 0,
+            extension: "rs".to_string(),
+        }]);
+
+        // regex: 模式即使含 / 也不被 path_search 拦截
+        let (results, err) = dispatch(&store, "regex:main\\.rs", SearchMode::Auto, 10);
+        assert!(err.is_none());
+        assert_eq!(results.len(), 1);
     }
 }

@@ -902,6 +902,11 @@ public protocol LokiiCoreProtocol: AnyObject, Sendable {
     /**
      * Update configuration from a JSON string. Returns true on success.
      * Writes to TOML file first, then syncs in-memory ConfigStore.
+     *
+     * The payload is treated as a patch over the currently effective config.
+     * The frontend models only a subset of the schema, so keys it omits must
+     * keep their existing values rather than fall back to defaults — otherwise
+     * every preference toggle would silently discard hand-edited settings.
      */
     func updateConfigFromJson(json: String)  -> Bool
     
@@ -1104,6 +1109,11 @@ open func startWatcher(eventHandler: EventHandler)  {try! rustCall() {
     /**
      * Update configuration from a JSON string. Returns true on success.
      * Writes to TOML file first, then syncs in-memory ConfigStore.
+     *
+     * The payload is treated as a patch over the currently effective config.
+     * The frontend models only a subset of the schema, so keys it omits must
+     * keep their existing values rather than fall back to defaults — otherwise
+     * every preference toggle would silently discard hand-edited settings.
      */
 open func updateConfigFromJson(json: String) -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
@@ -1401,11 +1411,12 @@ public struct FfiSearchResult {
     public var `extension`: String
     public var score: Double
     public var matchPositions: [FfiMatchRange]
+    public var parentMatchPositions: [FfiMatchRange]
     public var searchMode: FfiSearchMode
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(name: String, path: String, isDir: Bool, size: UInt64, modified: UInt64, created: UInt64, `extension`: String, score: Double, matchPositions: [FfiMatchRange], searchMode: FfiSearchMode) {
+    public init(name: String, path: String, isDir: Bool, size: UInt64, modified: UInt64, created: UInt64, `extension`: String, score: Double, matchPositions: [FfiMatchRange], parentMatchPositions: [FfiMatchRange], searchMode: FfiSearchMode) {
         self.name = name
         self.path = path
         self.isDir = isDir
@@ -1415,6 +1426,7 @@ public struct FfiSearchResult {
         self.`extension` = `extension`
         self.score = score
         self.matchPositions = matchPositions
+        self.parentMatchPositions = parentMatchPositions
         self.searchMode = searchMode
     }
 }
@@ -1453,6 +1465,9 @@ extension FfiSearchResult: Equatable, Hashable {
         if lhs.matchPositions != rhs.matchPositions {
             return false
         }
+        if lhs.parentMatchPositions != rhs.parentMatchPositions {
+            return false
+        }
         if lhs.searchMode != rhs.searchMode {
             return false
         }
@@ -1469,6 +1484,7 @@ extension FfiSearchResult: Equatable, Hashable {
         hasher.combine(`extension`)
         hasher.combine(score)
         hasher.combine(matchPositions)
+        hasher.combine(parentMatchPositions)
         hasher.combine(searchMode)
     }
 }
@@ -1491,6 +1507,7 @@ public struct FfiConverterTypeFfiSearchResult: FfiConverterRustBuffer {
                 extension: FfiConverterString.read(from: &buf), 
                 score: FfiConverterDouble.read(from: &buf), 
                 matchPositions: FfiConverterSequenceTypeFfiMatchRange.read(from: &buf), 
+                parentMatchPositions: FfiConverterSequenceTypeFfiMatchRange.read(from: &buf), 
                 searchMode: FfiConverterTypeFfiSearchMode.read(from: &buf)
         )
     }
@@ -1505,6 +1522,7 @@ public struct FfiConverterTypeFfiSearchResult: FfiConverterRustBuffer {
         FfiConverterString.write(value.`extension`, into: &buf)
         FfiConverterDouble.write(value.score, into: &buf)
         FfiConverterSequenceTypeFfiMatchRange.write(value.matchPositions, into: &buf)
+        FfiConverterSequenceTypeFfiMatchRange.write(value.parentMatchPositions, into: &buf)
         FfiConverterTypeFfiSearchMode.write(value.searchMode, into: &buf)
     }
 }
@@ -1624,6 +1642,8 @@ public enum FfiStartupMode {
     )
     case coldStart(scannedCount: UInt64
     )
+    case failed(message: String
+    )
 }
 
 
@@ -1647,6 +1667,9 @@ public struct FfiConverterTypeFfiStartupMode: FfiConverterRustBuffer {
         case 2: return .coldStart(scannedCount: try FfiConverterUInt64.read(from: &buf)
         )
         
+        case 3: return .failed(message: try FfiConverterString.read(from: &buf)
+        )
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -1663,6 +1686,11 @@ public struct FfiConverterTypeFfiStartupMode: FfiConverterRustBuffer {
         case let .coldStart(scannedCount):
             writeInt(&buf, Int32(2))
             FfiConverterUInt64.write(scannedCount, into: &buf)
+            
+        
+        case let .failed(message):
+            writeInt(&buf, Int32(3))
+            FfiConverterString.write(message, into: &buf)
             
         }
     }
@@ -1831,7 +1859,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_lokii_core_checksum_method_lokiicore_start_watcher() != 17814) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_lokii_core_checksum_method_lokiicore_update_config_from_json() != 17306) {
+    if (uniffi_lokii_core_checksum_method_lokiicore_update_config_from_json() != 16092) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_lokii_core_checksum_constructor_lokiicore_new() != 44128) {

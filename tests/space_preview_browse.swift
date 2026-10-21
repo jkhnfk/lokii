@@ -350,21 +350,23 @@ for item in intentCases {
 let driverAssertions4 = #"""
 // MARK: - 7. 与表格列对齐
 
-let windowSource = (try? String(contentsOfFile: repoRootPath + "/Lokii/Lokii/SearchWindow.swift",
+let windowSource = (try? String(contentsOfFile: repoRootPath + "/Lokii/Lokii/SearchResultsViewController.swift",
                                 encoding: .utf8)) ?? ""
 let folderSource = (try? String(contentsOfFile: repoRootPath + "/Lokii/Lokii/FolderBrowse.swift",
                                 encoding: .utf8)) ?? ""
-expect(!windowSource.isEmpty, "读得到 SearchWindow.swift")
+expect(!windowSource.isEmpty, "读得到 SearchResultsViewController.swift")
 expect(!folderSource.isEmpty, "读得到 FolderBrowse.swift")
 
-let tableKeys = Set(capture("NSSortDescriptor\\(key: \"([a-z]+)\"", in: windowSource))
+// 结果列表的列在后来的拆分里搬进了 SearchResultsViewController（表格与列定义都归它），
+// 排序描述符可能跨行书写，正则要容忍空白与换行。
+let tableKeys = Set(capture("NSSortDescriptor\\(\\s*key: \"([a-z]+)\"", in: windowSource))
 let browseKeys = Set(
     capture("enum BrowseSortKey: String \\{\\s*case ([A-Za-z, ]+)", in: folderSource)
         .flatMap { $0.components(separatedBy: ",") }
         .map { $0.trimmingCharacters(in: .whitespaces) }
 )
 expect(!tableKeys.isEmpty,
-       "能从 SearchWindow 里认出表格列的排序键",
+       "能从结果列表里认出表格列的排序键",
        detail: "认出 \(describe(tableKeys.sorted()))")
 expect(browseKeys == tableKeys,
        "BrowseSortKey 与表格列的排序键一一对应（对不上会静默退回按名称排）",

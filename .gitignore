@@ -9,6 +9,7 @@
 target/
 
 # Swift / SwiftPM 构建产物
+.build/
 Lokii/.build/
 .swiftpm/
 
@@ -16,6 +17,8 @@ Lokii/.build/
 output/
 *.dmg.tmp
 *.iconset/
+
+docs/
 
 # Xcode 用户状态与工作空间缓存
 xcuserdata/
@@ -49,3 +52,4 @@ Thumbs.db
 
 # Git 多分支工作树
 .worktrees/
+.superpowers/

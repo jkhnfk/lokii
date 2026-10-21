@@ -162,6 +162,11 @@ final class LokiiWindow: NSWindow {
         case 36: // Return
             onReturn?()
         default:
+            if event.modifierFlags.contains(.command),
+               event.charactersIgnoringModifiers?.lowercased() == "f" {
+                _ = onCommandF?()
+                return
+            }
             super.keyDown(with: event)
         }
     }

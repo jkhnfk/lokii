@@ -88,7 +88,11 @@ pub(crate) fn is_protected_or_descendant(path: &Path, protected: &[PathBuf]) -> 
 }
 
 #[cfg(test)]
-fn dummy_filter() -> std::sync::Arc<crate::filter::CompiledFilter> { let mut cfg = crate::config::AppConfig::default(); cfg.index.index_paths = vec![]; std::sync::Arc::new(crate::filter::CompiledFilter::from_config(&cfg)) }
+fn dummy_filter() -> std::sync::Arc<crate::filter::CompiledFilter> {
+    let mut cfg = crate::config::AppConfig::default();
+    cfg.index.index_paths = vec![];
+    std::sync::Arc::new(crate::filter::CompiledFilter::from_config(&cfg))
+}
 
 pub(crate) fn contains_protected_descendant(path: &Path, protected: &[PathBuf]) -> bool {
     protected.iter().any(|p| path_starts_with_ci(p, path))
@@ -114,8 +118,35 @@ pub fn scan_directories(
     include_hidden: bool,
     progress: Arc<AtomicUsize>,
 ) -> Vec<FileEntry> {
-    let mut all_entries = Vec::new();
+    let mut entries = Vec::new();
+    scan_with_sink(paths, filter, include_hidden, progress, |entry| {
+        entries.push(entry);
+        Ok(())
+    })
+    .expect("infallible vector sink");
+    entries
+}
 
+pub fn scan_compact(
+    paths: &[PathBuf],
+    filter: Arc<crate::filter::CompiledFilter>,
+    include_hidden: bool,
+    progress: Arc<AtomicUsize>,
+) -> Result<crate::compact_index::CompactIndex, crate::compact_index::IndexError> {
+    let mut index = crate::compact_index::CompactIndex::new();
+    scan_with_sink(paths, filter, include_hidden, progress, |entry| {
+        index.push(entry)
+    })?;
+    Ok(index)
+}
+
+fn scan_with_sink(
+    paths: &[PathBuf],
+    filter: Arc<crate::filter::CompiledFilter>,
+    include_hidden: bool,
+    progress: Arc<AtomicUsize>,
+    mut sink: impl FnMut(FileEntry) -> Result<(), crate::compact_index::IndexError>,
+) -> Result<(), crate::compact_index::IndexError> {
     // 没有 FDA 时跳过受保护路径，避免触发系统权限弹窗
     let skip_paths: Vec<PathBuf> = if has_full_disk_access() {
         vec![]
@@ -178,7 +209,7 @@ pub fn scan_directories(
                             .map(|ext| ext.to_string_lossy().to_lowercase())
                             .unwrap_or_default()
                     };
-                    all_entries.push(FileEntry {
+                    sink(FileEntry {
                         name: name_str.into_owned(),
                         path: entry.path().to_string_lossy().into_owned(),
                         is_dir: metadata.is_dir(),
@@ -196,14 +227,14 @@ pub fn scan_directories(
                             .map(|d| d.as_secs())
                             .unwrap_or(0),
                         extension,
-                    });
+                    })?;
                     progress.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
     }
 
-    all_entries
+    Ok(())
 }
 
 #[cfg(test)]
@@ -217,10 +248,7 @@ mod tests {
     }
 
     fn make_temp_dir() -> tempfile::TempDir {
-        Builder::new()
-            .prefix("lokii_test_")
-            .tempdir()
-            .unwrap()
+        Builder::new().prefix("lokii_test_").tempdir().unwrap()
     }
 
     #[test]
@@ -240,7 +268,11 @@ mod tests {
 
         // Should have the root dir + 3 files = 4, or just 3 files
         // jwalk includes the root directory entry
-        assert!(entries.len() >= 3, "Expected at least 3 entries, got {}", entries.len());
+        assert!(
+            entries.len() >= 3,
+            "Expected at least 3 entries, got {}",
+            entries.len()
+        );
 
         // Verify entries have non-empty names and paths
         for entry in &entries {
@@ -259,16 +291,15 @@ mod tests {
     fn test_scan_exclude_dir() {
         let tmp = make_temp_dir();
         fs::create_dir_all(tmp.path().join("node_modules/pkg")).unwrap();
-        fs::write(tmp.path().join("node_modules/pkg/index.js"), "module.exports = {}").unwrap();
+        fs::write(
+            tmp.path().join("node_modules/pkg/index.js"),
+            "module.exports = {}",
+        )
+        .unwrap();
         fs::write(tmp.path().join("app.rs"), "fn main() {}").unwrap();
 
         let progress = make_progress();
-        let entries = scan_directories(
-            &[tmp.path().to_path_buf()],
-            dummy_filter(),
-            true,
-            progress,
-        );
+        let entries = scan_directories(&[tmp.path().to_path_buf()], dummy_filter(), true, progress);
 
         // No entry should contain "node_modules" in its path
         for entry in &entries {
@@ -300,7 +331,10 @@ mod tests {
 
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"visible"), "visible file should be present");
-        assert!(!names.contains(&".hidden"), ".hidden file should be excluded");
+        assert!(
+            !names.contains(&".hidden"),
+            ".hidden file should be excluded"
+        );
     }
 
     #[test]
@@ -319,7 +353,10 @@ mod tests {
 
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"visible"), "visible file should be present");
-        assert!(names.contains(&".hidden"), ".hidden file should be included");
+        assert!(
+            names.contains(&".hidden"),
+            ".hidden file should be included"
+        );
     }
 
     #[test]
@@ -351,7 +388,10 @@ mod tests {
             true,
             progress,
         );
-        assert!(entries.is_empty(), "Scanning nonexistent path should return empty");
+        assert!(
+            entries.is_empty(),
+            "Scanning nonexistent path should return empty"
+        );
     }
 
     #[test]
@@ -362,12 +402,7 @@ mod tests {
         fs::write(subdir.join("test.txt"), "content").unwrap();
 
         let progress = make_progress();
-        let entries = scan_directories(
-            &[tmp.path().to_path_buf()],
-            dummy_filter(),
-            true,
-            progress,
-        );
+        let entries = scan_directories(&[tmp.path().to_path_buf()], dummy_filter(), true, progress);
 
         // Find the test.txt entry
         let test_entry = entries.iter().find(|e| e.name == "test.txt");
@@ -395,12 +430,7 @@ mod tests {
         fs::create_dir(tmp.path().join("mydir")).unwrap();
 
         let progress = make_progress();
-        let entries = scan_directories(
-            &[tmp.path().to_path_buf()],
-            dummy_filter(),
-            true,
-            progress,
-        );
+        let entries = scan_directories(&[tmp.path().to_path_buf()], dummy_filter(), true, progress);
 
         let rs_entry = entries.iter().find(|e| e.name == "test.rs").unwrap();
         assert_eq!(rs_entry.extension, "rs");

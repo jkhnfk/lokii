@@ -3,7 +3,6 @@ use std::sync::{Arc, Mutex};
 
 use crate::cache;
 use crate::config::{self, AppConfig, ConfigStore};
-use serde_json;
 use crate::indexer::IndexStore;
 use crate::metrics::WatcherMetrics;
 use crate::permissions;
@@ -26,6 +25,7 @@ pub struct FfiSearchResult {
     pub extension: String,
     pub score: f64,
     pub match_positions: Vec<FfiMatchRange>,
+    pub parent_match_positions: Vec<FfiMatchRange>,
     pub search_mode: FfiSearchMode,
 }
 
@@ -65,6 +65,7 @@ pub enum FfiSearchMode {
 pub enum FfiStartupMode {
     HotStart { cached_count: u64 },
     ColdStart { scanned_count: u64 },
+    Failed { message: String },
 }
 
 // ── Callback Interface ──────────────────────────────────────────────────
@@ -117,15 +118,20 @@ fn convert_results(results: Vec<AdvancedSearchResult>) -> Vec<FfiSearchResult> {
             created: r.entry.created_at,
             extension: r.entry.extension,
             score: r.score,
-            match_positions: r
-                .match_positions
-                .into_iter()
-                .map(|(s, e)| FfiMatchRange {
-                    start: s as u32,
-                    end: e as u32,
-                })
-                .collect(),
+            match_positions: convert_ranges(r.match_positions),
+            parent_match_positions: convert_ranges(r.parent_match_positions),
             search_mode: r.search_mode.into(),
+        })
+        .collect()
+}
+
+/// 把搜索核心的字节区间转换为 FFI 记录形态。
+fn convert_ranges(ranges: Vec<(usize, usize)>) -> Vec<FfiMatchRange> {
+    ranges
+        .into_iter()
+        .map(|(s, e)| FfiMatchRange {
+            start: s as u32,
+            end: e as u32,
         })
         .collect()
 }
@@ -175,15 +181,12 @@ impl LokiiCore {
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let poll_done = Arc::clone(&done);
 
-        std::thread::spawn(move || {
+        let poller = std::thread::spawn(move || {
             let phase = "scanning".to_string();
-            loop {
+            while !poll_done.load(Ordering::Relaxed) {
                 let count = poll_progress.load(Ordering::Relaxed);
                 poll_handler.on_index_progress(phase.clone(), count as u64);
-                if poll_done.load(Ordering::Relaxed) {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::thread::park_timeout(std::time::Duration::from_millis(50));
             }
         });
 
@@ -191,6 +194,25 @@ impl LokiiCore {
         let mode = startup::initialize_index(&self.store, &config, progress, &cache_file);
 
         done.store(true, Ordering::Relaxed);
+        poller.thread().unpark();
+        let _ = poller.join();
+        self.finish_initialization(mode, config, cache_file, event_handler)
+    }
+}
+
+impl LokiiCore {
+    fn finish_initialization(
+        &self,
+        mode: startup::StartupMode,
+        config: AppConfig,
+        cache_file: std::path::PathBuf,
+        event_handler: Arc<dyn EventHandler>,
+    ) -> FfiStartupMode {
+        if let startup::StartupMode::Failed(error) = mode {
+            return FfiStartupMode::Failed {
+                message: format!("Index initialization failed: {error}"),
+            };
+        }
         event_handler.on_index_ready(self.store.len() as u64);
 
         // For hot start, spawn background verification (non-blocking)
@@ -204,7 +226,12 @@ impl LokiiCore {
             std::thread::spawn(move || {
                 let _guard = verify_lock.lock().unwrap();
                 verify_handler.on_index_progress("verifying".to_string(), 0);
-                startup::verify_index(&store, &verify_config, &cache_file, &cancel);
+                if let Err(error) =
+                    startup::verify_index(&store, &verify_config, &cache_file, &cancel)
+                {
+                    verify_handler.on_watcher_error(format!("Index verification failed: {error}"));
+                    return;
+                }
                 // Only update if not cancelled (rebuild took over)
                 if !cancel.load(Ordering::Relaxed) {
                     verify_handler.on_index_updated(store.len() as u64);
@@ -213,19 +240,19 @@ impl LokiiCore {
         }
 
         match mode {
-            startup::StartupMode::HotStart { cached_count } => {
-                FfiStartupMode::HotStart {
-                    cached_count: cached_count as u64,
-                }
-            }
-            startup::StartupMode::ColdStart { scanned_count } => {
-                FfiStartupMode::ColdStart {
-                    scanned_count: scanned_count as u64,
-                }
-            }
+            startup::StartupMode::HotStart { cached_count } => FfiStartupMode::HotStart {
+                cached_count: cached_count as u64,
+            },
+            startup::StartupMode::ColdStart { scanned_count } => FfiStartupMode::ColdStart {
+                scanned_count: scanned_count as u64,
+            },
+            startup::StartupMode::Failed(_) => unreachable!("failed startup returned before ready"),
         }
     }
+}
 
+#[uniffi::export]
+impl LokiiCore {
     /// Start the file system watcher. Calls event_handler.on_index_updated
     /// whenever the index changes. Non-blocking (spawns a thread internally).
     pub fn start_watcher(&self, event_handler: Arc<dyn EventHandler>) {
@@ -233,9 +260,14 @@ impl LokiiCore {
         let handler = Arc::clone(&event_handler);
         let metrics = Arc::clone(&self.metrics);
 
-        if let Err(e) = watcher::start_watcher(self.store.clone(), config.clone(), metrics, move |new_total| {
-            handler.on_index_updated(new_total as u64);
-        }) {
+        if let Err(e) = watcher::start_watcher(
+            self.store.clone(),
+            config.clone(),
+            metrics,
+            move |new_total| {
+                handler.on_index_updated(new_total as u64);
+            },
+        ) {
             event_handler.on_watcher_error(format!("{e}"));
         }
 
@@ -339,20 +371,24 @@ impl LokiiCore {
         let paths = config.resolve_paths();
 
         let filter = Arc::new(crate::filter::CompiledFilter::from_config(&config));
-        let fresh = scanner::scan_directories(
-            &paths,
-            filter,
-            config.index.include_hidden,
-            progress,
-        );
+        let fresh =
+            match scanner::scan_compact(&paths, filter, config.index.include_hidden, progress) {
+                Ok(fresh) => fresh,
+                Err(error) => {
+                    done.store(true, Ordering::Relaxed);
+                    event_handler.on_watcher_error(format!("Index rebuild failed: {error}"));
+                    return false;
+                }
+            };
 
         done.store(true, Ordering::Relaxed);
-        self.store.replace(fresh);
 
-        // Save cache
+        // Save cache before publishing the index: encoding a multi-million
+        // entry index must not happen while holding the store lock.
         let cache_file = AppConfig::config_dir().join("index.cache");
-        let entries = self.store.entries();
-        let _ = cache::save_cache(&entries, &cache_file);
+        let _ = cache::save_compact(&fresh, &cache_file);
+
+        self.store.replace_compact(fresh);
 
         drop(guard);
         event_handler.on_index_ready(self.store.len() as u64);
@@ -386,9 +422,8 @@ impl LokiiCore {
     /// Get the current configuration as a JSON string.
     pub fn get_config_json(&self) -> String {
         let config = self.config_store.read();
-        serde_json::to_string_pretty(&*config).unwrap_or_else(|_| {
-            serde_json::to_string_pretty(&AppConfig::default()).unwrap()
-        })
+        serde_json::to_string_pretty(&*config)
+            .unwrap_or_else(|_| serde_json::to_string_pretty(&AppConfig::default()).unwrap())
     }
 
     /// Get watcher diagnostic metrics as a JSON string.
@@ -398,11 +433,17 @@ impl LokiiCore {
 
     /// Update configuration from a JSON string. Returns true on success.
     /// Writes to TOML file first, then syncs in-memory ConfigStore.
+    ///
+    /// The payload is treated as a patch over the currently effective config.
+    /// The frontend models only a subset of the schema, so keys it omits must
+    /// keep their existing values rather than fall back to defaults — otherwise
+    /// every preference toggle would silently discard hand-edited settings.
     pub fn update_config_from_json(&self, json: String) -> bool {
-        let new_config: AppConfig = match serde_json::from_str(&json) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("[Lokii] Failed to parse config JSON: {e}");
+        let current = self.config_store.read().clone();
+        let new_config = match merge_config_patch(&current, &json) {
+            Some(config) => config,
+            None => {
+                eprintln!("[Lokii] Failed to parse config JSON patch: {json}");
                 return false;
             }
         };
@@ -425,5 +466,176 @@ impl LokiiCore {
         // Sync memory directly (don't wait for file watcher)
         self.config_store.update(new_config);
         true
+    }
+}
+
+/// Overlay a frontend-supplied config patch onto the currently effective config.
+///
+/// The frontend mirrors only part of the schema (it has no notion of
+/// `index.exclude_paths`, for instance). Treating its payload as a complete
+/// config and rewriting the file from it resets every unmodelled key to its
+/// default, so user-edited values vanish on the next preference toggle.
+/// Layering the patch over the current config keeps absent keys intact.
+fn merge_config_patch(base: &AppConfig, patch: &str) -> Option<AppConfig> {
+    let patch: serde_json::Value = serde_json::from_str(patch).ok()?;
+    let base = serde_json::to_value(base).ok()?;
+    serde_json::from_value(deep_merge(base, patch)).ok()
+}
+
+/// Recursively overlay `patch` onto `base`: objects merge key by key, while
+/// arrays and scalars are replaced outright so a list can still be cleared.
+fn deep_merge(base: serde_json::Value, patch: serde_json::Value) -> serde_json::Value {
+    match (base, patch) {
+        (serde_json::Value::Object(mut base_map), serde_json::Value::Object(patch_map)) => {
+            for (key, patch_value) in patch_map {
+                let merged = match base_map.remove(&key) {
+                    Some(base_value) => deep_merge(base_value, patch_value),
+                    None => patch_value,
+                };
+                base_map.insert(key, merged);
+            }
+            serde_json::Value::Object(base_map)
+        }
+        (_, patch) => patch,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compact_index::IndexError;
+
+    #[derive(Default)]
+    struct RecordingHandler {
+        events: Mutex<Vec<String>>,
+    }
+
+    impl EventHandler for RecordingHandler {
+        fn on_index_progress(&self, phase: String, scanned_files: u64) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("{phase}:{scanned_files}"));
+        }
+
+        fn on_index_ready(&self, total: u64) {
+            self.events.lock().unwrap().push(format!("ready:{total}"));
+        }
+
+        fn on_index_updated(&self, new_total: u64) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("updated:{new_total}"));
+        }
+
+        fn on_watcher_error(&self, msg: String) {
+            self.events.lock().unwrap().push(msg);
+        }
+
+        fn on_config_reloaded(&self) {}
+    }
+
+    fn core() -> LokiiCore {
+        LokiiCore {
+            store: IndexStore::new(),
+            config_store: ConfigStore::new(AppConfig::default()),
+            cancel_verify: Arc::new(AtomicBool::new(true)),
+            scan_lock: Arc::new(Mutex::new(())),
+            metrics: Arc::new(WatcherMetrics::new()),
+        }
+    }
+
+    #[test]
+    fn initialization_failure_returns_error_without_ready_or_verification() {
+        for error in [IndexError::IdOverflow, IndexError::ReferenceOverflow] {
+            let core = core();
+            let handler = Arc::new(RecordingHandler::default());
+            let directory = tempfile::tempdir().unwrap();
+            let result = core.finish_initialization(
+                startup::StartupMode::Failed(error),
+                AppConfig::default(),
+                directory.path().join("index.cache"),
+                handler.clone(),
+            );
+            let FfiStartupMode::Failed { message } = result else {
+                panic!("failed initialization must not report a successful startup");
+            };
+            assert_eq!(message, format!("Index initialization failed: {error}"));
+            assert!(handler.events.lock().unwrap().is_empty());
+            assert!(core.cancel_verify.load(Ordering::Relaxed));
+            assert!(core.store.is_empty());
+        }
+    }
+
+    #[test]
+    fn empty_cold_start_is_success_and_still_reports_ready() {
+        let core = core();
+        let handler = Arc::new(RecordingHandler::default());
+        let directory = tempfile::tempdir().unwrap();
+        let result = core.finish_initialization(
+            startup::StartupMode::ColdStart { scanned_count: 0 },
+            AppConfig::default(),
+            directory.path().join("index.cache"),
+            handler.clone(),
+        );
+        assert!(matches!(
+            result,
+            FfiStartupMode::ColdStart { scanned_count: 0 }
+        ));
+        assert_eq!(*handler.events.lock().unwrap(), ["ready:0"]);
+    }
+
+    /// 前端下发的配置只覆盖它建模过的字段，未建模字段必须原样保留，
+    /// 否则用户手改 config.toml 里的 exclude_paths 会在下次切换偏好设置时被静默重置
+    #[test]
+    fn config_patch_preserves_keys_the_frontend_does_not_model() {
+        let mut base = AppConfig::default();
+        base.index.exclude_paths = vec!["~/Library".to_string()];
+
+        let patch = r#"{
+            "general": { "language": "en", "show_in_dock": false },
+            "index": {
+                "index_paths": ["~"],
+                "exclude": ["node_modules"],
+                "include_hidden": false,
+                "max_results": 100
+            },
+            "window": { "hide_on_blur": true, "remember_position": false }
+        }"#;
+
+        let merged = merge_config_patch(&base, patch).expect("patch should merge");
+
+        assert_eq!(merged.general.language, "en");
+        assert!(!merged.general.show_in_dock);
+        assert_eq!(merged.index.max_results, 100);
+        assert_eq!(merged.index.exclude, vec!["node_modules".to_string()]);
+        assert_eq!(
+            merged.index.exclude_paths,
+            vec!["~/Library".to_string()],
+            "未建模的 exclude_paths 必须保留"
+        );
+    }
+
+    /// 显式下发的空数组表示清空，必须能覆盖基底，不能被合并逻辑吞掉
+    #[test]
+    fn config_patch_can_explicitly_clear_a_list() {
+        let base = AppConfig::default();
+
+        let merged = merge_config_patch(&base, r#"{ "index": { "exclude": [] } }"#)
+            .expect("patch should merge");
+
+        assert!(merged.index.exclude.is_empty(), "空数组应清空列表");
+        assert!(
+            !merged.index.exclude_paths.is_empty(),
+            "同一节里未被提及的字段不受影响"
+        );
+    }
+
+    /// 非法补丁必须被拒绝，而不是回退成一份默认配置覆盖用户设置
+    #[test]
+    fn malformed_config_patch_is_rejected() {
+        assert!(merge_config_patch(&AppConfig::default(), "not json").is_none());
+        assert!(merge_config_patch(&AppConfig::default(), r#"{ "index": 42 }"#).is_none());
     }
 }

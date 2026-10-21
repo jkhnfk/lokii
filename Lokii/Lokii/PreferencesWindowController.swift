@@ -27,21 +27,22 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
 
         super.init(window: window)
         window.delegate = self
+        NotificationCenter.default.addObserver(self, selector: #selector(onLanguageChanged),
+                                               name: L10n.languageChangedNotification, object: nil)
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
 
+    @objc private func onLanguageChanged() {
+        window?.title = L("prefs.windowTitle")
+    }
+
     override func showWindow(_ sender: Any?) {
         super.showWindow(sender)
         viewModel?.loadConfig()
         viewModel?.updateFDAStatus()
-    }
-
-    func showWindow(tab: String) {
-        viewModel?.selectedTab = tab
-        showWindow(nil)
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {

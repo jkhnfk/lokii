@@ -74,138 +74,105 @@ pub fn score_match(name_lower: &str, keywords: &[String]) -> Option<MatchScore> 
     Some(score)
 }
 
-/// Thread-safe in-memory index store.
-///
-/// Wraps `Vec<FileEntry>` behind `Arc<parking_lot::RwLock>` for concurrent
-/// read-heavy access (many searches, rare writes).
 #[derive(Clone)]
 pub struct IndexStore {
-    entries: Arc<RwLock<Vec<FileEntry>>>,
+    entries: Arc<RwLock<crate::compact_index::CompactIndex>>,
 }
 
 impl IndexStore {
-    /// Create a new empty index store.
     pub fn new() -> Self {
         Self {
-            entries: Arc::new(RwLock::new(Vec::new())),
+            entries: Arc::new(RwLock::new(crate::compact_index::CompactIndex::new())),
         }
     }
 
-    /// Replace the entire index with new entries.
-    ///
-    /// Takes a write lock and swaps the Vec. Build the new Vec outside
-    /// the lock to minimize write lock duration.
     pub fn replace(&self, entries: Vec<FileEntry>) {
-        let mut lock = self.entries.write();
-        *lock = entries;
+        match crate::compact_index::CompactIndex::from_entries(entries) {
+            Ok(index) => self.replace_compact(index),
+            Err(error) => eprintln!("[Lokii] index replacement failed: {error}"),
+        }
     }
 
-    /// Return the number of entries in the index.
+    pub fn replace_compact(&self, entries: crate::compact_index::CompactIndex) {
+        *self.entries.write() = entries;
+    }
+
     pub fn len(&self) -> usize {
         self.entries.read().len()
     }
-
-    /// Return whether the index is empty.
     pub fn is_empty(&self) -> bool {
         self.entries.read().is_empty()
     }
 
-    /// Return a read guard to the entries for search operations.
-    pub fn entries(&self) -> parking_lot::RwLockReadGuard<'_, Vec<FileEntry>> {
+    pub fn read(&self) -> parking_lot::RwLockReadGuard<'_, crate::compact_index::CompactIndex> {
         self.entries.read()
     }
 
-    /// Add new entries to the index (per D-06).
-    pub fn add_entries(&self, new_entries: Vec<FileEntry>) {
-        if new_entries.is_empty() {
-            return;
-        }
-        let mut lock = self.entries.write();
-        lock.extend(new_entries);
-    }
-
-    /// Remove entries whose path is in the given set (per D-06).
-    pub fn remove_paths(&self, paths: &HashSet<String>) {
-        if paths.is_empty() {
-            return;
-        }
-        let mut lock = self.entries.write();
-        lock.retain(|e| !paths.contains(&e.path));
-    }
-
-    /// Get a mutable write guard for complex batch operations (per D-07).
-    pub fn entries_mut(&self) -> parking_lot::RwLockWriteGuard<'_, Vec<FileEntry>> {
+    pub(crate) fn write(
+        &self,
+    ) -> parking_lot::RwLockWriteGuard<'_, crate::compact_index::CompactIndex> {
         self.entries.write()
     }
 
-    /// Search the index for entries matching the query.
-    ///
-    /// Query behavior:
-    /// - Empty/whitespace-only query returns empty results
-    /// - Query starting with '.' (no spaces) triggers extension-only filter
-    /// - Otherwise: split by whitespace into keywords, ALL must match (AND logic)
-    ///
-    /// Results are ranked: Exact > Prefix > Substring. Within each tier,
-    /// results are sorted alphabetically by name. Results are truncated
-    /// to `max_results`.
+    #[cfg(test)]
+    pub fn entries(&self) -> Vec<FileEntry> {
+        self.read()
+            .iter()
+            .map(|(_, view)| view.materialize())
+            .collect()
+    }
+
+    pub fn add_entries(&self, entries: Vec<FileEntry>) {
+        if let Err(error) = self.entries.write().add_entries(entries) {
+            eprintln!("[Lokii] index additions failed: {error}");
+        }
+    }
+
+    pub fn remove_paths(&self, paths: &HashSet<String>) {
+        self.entries
+            .write()
+            .remove_matching(|view| paths.iter().any(|path| view.path_equals(path)));
+    }
+
     pub fn search(&self, query: &str, max_results: usize) -> Vec<SearchResult> {
         let query = query.trim();
-        if query.is_empty() {
+        if query.is_empty() || max_results == 0 {
             return Vec::new();
         }
-
-        // Extension filter path: query starts with '.' and contains no spaces
-        if query.starts_with('.') && !query.contains(' ') {
-            let ext = query[1..].to_lowercase();
-            let entries = self.entries.read();
-            let mut results: Vec<SearchResult> = entries
-                .iter()
-                .filter(|e| {
-                    e.name
+        let read = self.read();
+        let extension =
+            (query.starts_with('.') && !query.contains(' ')).then(|| query[1..].to_lowercase());
+        let keywords: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+        let matches = match &extension {
+            Some(extension) => {
+                let mut top = crate::search::top_k::TopK::new(max_results);
+                for (id, view) in read.iter() {
+                    if view
+                        .name
                         .rsplit('.')
                         .next()
-                        .map(|e_ext| e_ext.to_lowercase() == ext)
-                        .unwrap_or(false)
-                })
-                .map(|e| SearchResult {
-                    entry: e.clone(),
-                    score: MatchScore::Exact,
-                })
-                .collect();
-            results.sort_by(|a, b| a.entry.name.cmp(&b.entry.name));
-            results.truncate(max_results);
-            return results;
-        }
-
-        // Standard search path
-        let keywords: Vec<String> = query
-            .split_whitespace()
-            .map(|s| s.to_lowercase())
-            .collect();
-
-        let entries = self.entries.read();
-        let mut results: Vec<SearchResult> = entries
-            .iter()
-            .filter_map(|e| {
-                let name_lower = e.name.to_lowercase();
-                score_match(&name_lower, &keywords).map(|score| SearchResult {
-                    entry: e.clone(),
-                    score,
-                })
+                        .is_some_and(|value| value.to_lowercase() == *extension)
+                    {
+                        top.offer(id.0, MatchScore::Exact, view.name);
+                    }
+                }
+                top.finish()
+            }
+            None => crate::search::rank_names(&read, max_results, |name| {
+                score_match(&name.to_lowercase(), &keywords)
+            }),
+        };
+        matches
+            .into_iter()
+            .map(|candidate| SearchResult {
+                entry: read
+                    .materialize(crate::compact_index::EntryId(candidate.ordinal))
+                    .unwrap(),
+                score: candidate.score,
             })
-            .collect();
-
-        // Sort: score descending, then name ascending
-        results.sort_by(|a, b| {
-            b.score
-                .cmp(&a.score)
-                .then_with(|| a.entry.name.cmp(&b.entry.name))
-        });
-        results.truncate(max_results);
-        results
+            .collect()
     }
 }
-
 impl Default for IndexStore {
     fn default() -> Self {
         Self::new()
@@ -546,8 +513,8 @@ mod tests {
         let store = IndexStore::new();
         store.replace(vec![make_entry("a.txt", "/a.txt", false)]);
         {
-            let mut guard = store.entries_mut();
-            guard.push(make_entry("b.txt", "/b.txt", false));
+            let mut guard = store.write();
+            guard.push(make_entry("b.txt", "/b.txt", false)).unwrap();
         }
         assert_eq!(store.len(), 2);
     }
